@@ -1,6 +1,7 @@
 import sys
 import os
 import asyncio
+import shutil
 import threading
 import json
 import subprocess
@@ -31,6 +32,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QListWidget,
     QListWidgetItem,
+    QFileDialog,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
@@ -46,7 +48,8 @@ from googleapiclient.discovery import build
 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --no-sandbox"
 
 GOOGLE_CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
-GOOGLE_SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+# Read-write scope so tasks added in the UI can be appended to the backlog sheet
+GOOGLE_SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 def is_wsl() -> bool:
@@ -72,6 +75,178 @@ def run_google_oauth(flow):
         finally:
             webbrowser.open = original_open
     return flow.run_local_server(port=0, open_browser=True)
+
+
+ENV_PATH = os.path.expanduser("~/.env")
+GOOGLE_CREDENTIALS_PATH = os.path.expanduser("~/google_credentials.json")
+
+SETUP_FIELDS = [
+    ("TELEGRAM_API_ID", "Telegram API ID", False),
+    ("TELEGRAM_API_HASH", "Telegram API Hash", False),
+    ("TELEGRAM_PHONE", "Telegram Phone (+380...)", False),
+    ("YOUTUBE_API_KEY", "YouTube Data API Key", False),
+    ("SPRINT_SHEET_ID", "Google Sheet ID — Sprint", False),
+    ("BACKLOG_SHEET_ID", "Google Sheet ID — Backlog", False),
+    ("TELEGRAM_EXE_PATH", "Telegram.exe path", True),
+    ("CHROME_EXE_PATH", "chrome.exe path", True),
+    ("RDP_FILE_PATH", "RDP file path", True),
+]
+
+REQUIRED_ENV_KEYS = [key for key, _, optional in SETUP_FIELDS if not optional]
+
+
+def missing_env_keys():
+    return [key for key in REQUIRED_ENV_KEYS if not os.getenv(key)]
+
+
+def save_env_values(values):
+    lines = []
+    if os.path.exists(ENV_PATH):
+        with open(ENV_PATH, "r", encoding="utf-8") as env_file:
+            lines = env_file.read().splitlines()
+    for key, value in values.items():
+        if not value:
+            continue
+        for index, line in enumerate(lines):
+            if line.startswith(f"{key}="):
+                lines[index] = f"{key}={value}"
+                break
+        else:
+            lines.append(f"{key}={value}")
+    with open(ENV_PATH, "w", encoding="utf-8") as env_file:
+        env_file.write("\n".join(lines) + "\n")
+
+
+class FirstRunSetupDialog(QDialog):
+    """One-time setup form shown on startup while required settings are missing."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("JARVIS — First Run Setup")
+        self.setMinimumWidth(520)
+        self.setStyleSheet(
+            """
+            QWidget {
+                color: #d6fff7;
+                background-color: #0b1113;
+                font-family: 'Cascadia Mono', 'DejaVu Sans Mono', monospace;
+            }
+            QLineEdit {
+                background-color: #101f21;
+                border: 1px solid #286e6b;
+                color: #b8eee4;
+                padding: 6px;
+                border-radius: 4px;
+            }
+            QPushButton {
+                color: #bffef1;
+                background-color: #142326;
+                border: 1px solid #286e6b;
+                border-radius: 6px;
+                padding: 7px 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                color: #071112;
+                background-color: #73f6de;
+            }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+
+        header = QLabel("SETUP REQUIRED\n\nEnter your keys below — they will be saved to ~/.env")
+        header.setStyleSheet("color: #73f6de; font-size: 13px; font-weight: bold;")
+        layout.addWidget(header)
+
+        self.inputs = {}
+        for key, label, optional in SETUP_FIELDS:
+            field_label = QLabel(f"{label}{' (optional)' if optional else ' *'}")
+            field_label.setStyleSheet("color: #9effef; font-size: 11px;")
+            layout.addWidget(field_label)
+            input_field = QLineEdit()
+            input_field.setText(os.getenv(key, ""))
+            self.inputs[key] = input_field
+            layout.addWidget(input_field)
+
+        credentials_row = QHBoxLayout()
+        credentials_exists = os.path.exists(GOOGLE_CREDENTIALS_PATH)
+        self.credentials_status = QLabel(
+            "google_credentials.json: FOUND" if credentials_exists
+            else "google_credentials.json: NOT FOUND"
+        )
+        self.credentials_status.setStyleSheet(
+            f"color: {'#73f6de' if credentials_exists else '#ff4444'}; font-size: 11px;"
+        )
+        browse_button = QPushButton("BROWSE...")
+        browse_button.clicked.connect(self.pick_credentials)
+        credentials_row.addWidget(self.credentials_status, 1)
+        credentials_row.addWidget(browse_button)
+        layout.addLayout(credentials_row)
+
+        buttons = QHBoxLayout()
+        save_button = QPushButton("SAVE && START")
+        save_button.clicked.connect(self.save_and_close)
+        skip_button = QPushButton("SKIP")
+        skip_button.clicked.connect(self.reject)
+        buttons.addWidget(save_button)
+        buttons.addWidget(skip_button)
+        layout.addLayout(buttons)
+
+    def pick_credentials(self):
+        source, _ = QFileDialog.getOpenFileName(
+            self, "Select google_credentials.json", os.path.expanduser("~"), "JSON files (*.json)"
+        )
+        if source:
+            shutil.copy(source, GOOGLE_CREDENTIALS_PATH)
+            self.credentials_status.setText("google_credentials.json: COPIED")
+            self.credentials_status.setStyleSheet("color: #73f6de; font-size: 11px;")
+
+    def save_and_close(self):
+        save_env_values({key: field.text().strip() for key, field in self.inputs.items()})
+        self.accept()
+
+
+def append_backlog_task(name, description):
+    """Append a task row to the backlog Google Sheet. Returns (ok, message)."""
+    backlog_sheet_id = os.getenv("BACKLOG_SHEET_ID", "")
+    if not backlog_sheet_id:
+        return False, "BACKLOG_SHEET_ID not set"
+    token_path = os.path.expanduser("~/.google_sheets_token.json")
+    credentials = None
+    if os.path.exists(token_path):
+        credentials = Credentials.from_authorized_user_file(token_path, GOOGLE_SHEETS_SCOPES)
+    if credentials and credentials.expired and credentials.refresh_token:
+        credentials.refresh(Request())
+    if not credentials or not credentials.valid:
+        return False, "Sheets not authorized (restart app to sign in)"
+    service = build("sheets", "v4", credentials=credentials)
+    try:
+        service.spreadsheets().values().append(
+            spreadsheetId=backlog_sheet_id,
+            range="A1",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": [[name, description, "Начало"]]},
+        ).execute()
+    except Exception as error:
+        if "insufficient" in str(error).lower() or "403" in str(error):
+            return False, "No write access: delete ~/.google_sheets_token.json and restart to re-auth"
+        raise
+    return True, "Saved to backlog sheet"
+
+
+def save_task_to_backlog_sheet(name, description, notifier, item):
+    """Save a task in the background; result arrives via notifier.sheet_save_result."""
+    def worker():
+        try:
+            ok, message = append_backlog_task(name, description)
+        except Exception as error:
+            ok, message = False, str(error)[:60]
+        notifier.sheet_save_result.emit(item, ok, message)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 # Extended HUD Data Workers
@@ -314,24 +489,35 @@ class NewsWorker(QThread):
             try:
                 news_items = []
                 
-                # Monitor AI news from major sources
+                # Monitor AI news from major sources via RSS/Atom feeds
                 sources = [
-                    ("https://techcrunch.com/tag/artificial-intelligence/", "TechCrunch AI"),
+                    ("https://techcrunch.com/category/artificial-intelligence/feed/", "TechCrunch AI"),
+                    ("https://feeds.arstechnica.com/arstechnica/technology-lab", "Ars Technica"),
+                    ("https://www.wired.com/feed/tag/ai/latest/rss", "Wired AI"),
+                    ("https://www.theverge.com/rss/ai-artificial-intelligence/index.xml", "The Verge AI"),
                 ]
-                
+
                 for url, source_name in sources:
                     try:
                         response = requests.get(url, timeout=10, headers={
                             "User-Agent": "Mozilla/5.0"
                         })
-                        soup = BeautifulSoup(response.content, "html.parser")
-                        
-                        for article in soup.find_all("a", class_="post-block__title__link")[:3]:
-                            title = article.get_text().strip()
-                            link = article.get("href", "")
+                        try:
+                            soup = BeautifulSoup(response.content, "xml")
+                        except Exception:
+                            soup = BeautifulSoup(response.content, "html.parser")
+
+                        # RSS uses <item>, Atom uses <entry> with <link href="..."/>
+                        for entry in soup.find_all(["item", "entry"])[:3]:
+                            title_tag = entry.find("title")
+                            link_tag = entry.find("link")
+                            title = title_tag.get_text().strip() if title_tag else ""
+                            link = ""
+                            if link_tag:
+                                link = link_tag.get("href") or link_tag.get_text().strip()
                             if title and link:
                                 news_items.append((title[:80], link, source_name))
-                    except:
+                    except Exception:
                         pass
                 
                 self.news_updated.emit(news_items)
@@ -709,11 +895,116 @@ class EmbeddedTerminal(QPlainTextEdit):
                 self.process.kill()
 
 
-class ExtendedHUD(QWidget):
+class HudDataMixin:
+    """Shared update handlers for HUD panels (financial, tasks, videos, news, task form).
+
+    Classes using this mixin must define the widget attributes referenced below.
+    """
+
+    hud_task_limit = 5
+    hud_item_max_len = 50
+    hud_title_max_len = 40
+    hud_news_title_max_len = 35
+    hud_use_carousel = True
+    hud_task_prefix = "ext_"
+
+    def _hud_attr(self, name):
+        return getattr(self, f"{self.hud_task_prefix}{name}")
+
+    def update_financial_data(self, data):
+        self.btc_indicator.value = data.get("btc_price", 0)
+        self.btc_indicator.change = data.get("btc_change", 0)
+        self.btc_indicator.update()
+
+        self.uah_indicator.value = data.get("uah_rate", 0)
+        self.uah_indicator.update()
+
+    def update_tasks(self, sprint_tasks, backlog_tasks):
+        sprint_list = self._hud_attr("sprint_list")
+        backlog_list = self._hud_attr("backlog_list")
+
+        sprint_list.clear()
+        for task in sprint_tasks[:self.hud_task_limit]:
+            if len(task) >= 2:
+                item_text = f"{task[0]} ({task[1]})" if len(task) > 1 else task[0]
+                sprint_list.addItem(QListWidgetItem(item_text[:self.hud_item_max_len]))
+
+        backlog_list.clear()
+        for task in backlog_tasks[:self.hud_task_limit]:
+            if len(task) >= 1:
+                backlog_list.addItem(QListWidgetItem(task[0][:self.hud_item_max_len]))
+
+    def update_videos(self, videos):
+        video_list = self._hud_attr("video_list")
+        video_list.clear()
+        if not videos:
+            video_list.addItem("NO VIDEOS — check YOUTUBE_API_KEY or network")
+            return
+        for title, video_id, thumbnail in videos:
+            item = QListWidgetItem(title[:self.hud_title_max_len])
+            item.setData(Qt.ItemDataRole.UserRole, video_id)
+            video_list.addItem(item)
+
+    def play_video(self, item):
+        video_id = item.data(Qt.ItemDataRole.UserRole)
+        webbrowser.open(f"https://www.youtube.com/watch?v={video_id}")
+
+    def update_news(self, news_items):
+        if self.hud_use_carousel:
+            self._hud_attr("news_carousel").set_news(news_items)
+
+        news_list = self._hud_attr("news_list")
+        news_list.clear()
+        if not news_items:
+            news_list.addItem("NO NEWS AVAILABLE")
+            return
+        for title, link, source in news_items:
+            item = QListWidgetItem(f"[{source}] {title[:self.hud_news_title_max_len]}")
+            item.setData(Qt.ItemDataRole.UserRole, link)
+            news_list.addItem(item)
+
+    def open_news(self, item):
+        link = item.data(Qt.ItemDataRole.UserRole)
+        webbrowser.open(link)
+
+    def show_add_task_form(self):
+        self._hud_attr("task_form").show()
+        self._hud_attr("task_name_input").setFocus()
+
+    def hide_add_task_form(self):
+        self._hud_attr("task_form").hide()
+        self._hud_attr("task_name_input").clear()
+        self._hud_attr("task_desc_input").clear()
+
+    def save_task(self):
+        name = self._hud_attr("task_name_input").text()
+        desc = self._hud_attr("task_desc_input").text()
+        if name:
+            item = QListWidgetItem(f"{name[:30]} - {desc[:15]}")
+            self._hud_attr("backlog_list").addItem(item)
+            self.hide_add_task_form()
+            save_task_to_backlog_sheet(name, desc, self, item)
+
+    def on_sheet_save_result(self, item, ok, message):
+        if ok:
+            item.setText(f"{item.text()} ✓")
+        else:
+            item.setText(f"⚠ NOT SAVED ({message}): {item.text()}")
+
+
+class ExtendedHUD(HudDataMixin, QWidget):
     """Extended HUD for second monitor with task management, financial data, and news"""
-    
-    def __init__(self):
-        super().__init__()
+
+    hud_task_limit = 10
+    hud_item_max_len = 10_000  # extended HUD shows full task text
+    hud_title_max_len = 60
+    hud_news_title_max_len = 10_000  # full headlines
+    hud_task_prefix = "ext_"
+
+    sheet_save_result = pyqtSignal(object, bool, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self.setWindowTitle("Extended HUD")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnBottomHint)
         
@@ -761,9 +1052,13 @@ class ExtendedHUD(QWidget):
             screen_geometry = screens[1].geometry()
             self.setGeometry(screen_geometry)
         else:
-            # Fallback: offset from primary screen
+            # Fallback: centered window on the primary screen
             primary_geometry = QApplication.primaryScreen().geometry()
-            self.setGeometry(primary_geometry.width(), 0, primary_geometry.width(), primary_geometry.height())
+            self.setGeometry(
+                max(0, primary_geometry.center().x() - 700),
+                max(0, primary_geometry.center().y() - 450),
+                1400, 900,
+            )
         
         # Main layout
         main_layout = QHBoxLayout()
@@ -783,7 +1078,9 @@ class ExtendedHUD(QWidget):
         main_layout.addWidget(right_panel, 1)
         
         self.setLayout(main_layout)
-        
+
+        self.sheet_save_result.connect(self.on_sheet_save_result)
+
         # Workers are started by the main application; ExtendedHUD will receive updates via connected signals.
         self.status_label = QLabel("EXTENDED HUD: IDLE")
         self.status_label.setStyleSheet("color: #b8eee4;")
@@ -818,7 +1115,7 @@ class ExtendedHUD(QWidget):
         layout.addSpacing(10)
         
         add_task_btn = QPushButton("+ ДОБАВИТЬ В БЭКЛОГ")
-        add_task_btn.clicked.connect(self.show_ext_add_task_form)
+        add_task_btn.clicked.connect(self.show_add_task_form)
         layout.addWidget(add_task_btn)
         
         self.ext_task_form = QWidget()
@@ -837,9 +1134,9 @@ class ExtendedHUD(QWidget):
         
         form_buttons = QHBoxLayout()
         save_btn = QPushButton("СОХР")
-        save_btn.clicked.connect(self.save_ext_task)
+        save_btn.clicked.connect(self.save_task)
         cancel_btn = QPushButton("ОТМЕН")
-        cancel_btn.clicked.connect(self.hide_ext_add_task_form)
+        cancel_btn.clicked.connect(self.hide_add_task_form)
         form_buttons.addWidget(save_btn)
         form_buttons.addWidget(cancel_btn)
         task_form_layout.addLayout(form_buttons)
@@ -876,8 +1173,9 @@ class ExtendedHUD(QWidget):
         
         self.ext_video_list = QListWidget()
         self.ext_video_list.setMaximumHeight(150)
+        self.ext_video_list.itemDoubleClicked.connect(self.play_video)
         layout.addWidget(self.ext_video_list)
-        
+
         layout.addStretch()
         return panel
 
@@ -900,108 +1198,12 @@ class ExtendedHUD(QWidget):
         news_scroll.setStyleSheet("QScrollArea { background-color: #0d1719; border: 1px solid #286e6b; }")
         
         self.ext_news_list = QListWidget()
+        self.ext_news_list.itemClicked.connect(self.open_news)
         news_scroll.setWidget(self.ext_news_list)
         layout.addWidget(news_scroll, 1)
         
         layout.addStretch()
         return panel
-
-    def update_financial_data(self, data):
-        self.btc_indicator.value = data.get("btc_price", 0)
-        self.btc_indicator.change = data.get("btc_change", 0)
-        self.btc_indicator.update()
-        
-        self.uah_indicator.value = data.get("uah_rate", 0)
-        self.uah_indicator.update()
-
-    def update_tasks(self, sprint_tasks, backlog_tasks):
-        # Extended HUD lists
-        try:
-            self.ext_sprint_list.clear()
-            for task in sprint_tasks[:10]:
-                if len(task) >= 2:
-                    item_text = f"{task[0]} ({task[1]})" if len(task) > 1 else task[0]
-                    item = QListWidgetItem(item_text)
-                    self.ext_sprint_list.addItem(item)
-        except AttributeError:
-            pass
-        
-        try:
-            self.ext_backlog_list.clear()
-            for task in backlog_tasks[:10]:
-                if len(task) >= 1:
-                    item_text = task[0]
-                    item = QListWidgetItem(item_text)
-                    self.ext_backlog_list.addItem(item)
-        except AttributeError:
-            pass
-
-    def update_videos(self, videos):
-        # Extended HUD video list
-        try:
-            self.ext_video_list.clear()
-            if not videos:
-                self.ext_video_list.addItem("NO VIDEOS — check YOUTUBE_API_KEY or network")
-                return
-            for title, video_id, thumbnail in videos:
-                item = QListWidgetItem(title[:60])
-                item.setData(Qt.ItemDataRole.UserRole, video_id)
-                self.ext_video_list.addItem(item)
-            if self.ext_video_list.count() > 0:
-                self.ext_video_list.itemDoubleClicked.connect(self.play_video)
-        except AttributeError:
-            pass
-
-    def play_video(self, item):
-        video_id = item.data(Qt.ItemDataRole.UserRole)
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        webbrowser.open(url)
-
-    def update_news(self, news_items):
-        try:
-            self.ext_news_carousel.set_news(news_items)
-            self.ext_news_list.clear()
-            if not news_items:
-                self.ext_news_list.addItem("NO NEWS AVAILABLE")
-                return
-            for title, link, source in news_items:
-                item = QListWidgetItem(f"[{source}] {title}")
-                item.setData(Qt.ItemDataRole.UserRole, link)
-                self.ext_news_list.addItem(item)
-            if self.ext_news_list.count() > 0:
-                self.ext_news_list.itemClicked.connect(self.open_news)
-        except AttributeError:
-            pass
-
-    def open_news(self, item):
-        link = item.data(Qt.ItemDataRole.UserRole)
-        webbrowser.open(link)
-
-    def show_ext_add_task_form(self):
-        try:
-            self.ext_task_form.show()
-            self.ext_task_name_input.setFocus()
-        except AttributeError:
-            pass
-
-    def hide_ext_add_task_form(self):
-        try:
-            self.ext_task_form.hide()
-            self.ext_task_name_input.clear()
-            self.ext_task_desc_input.clear()
-        except AttributeError:
-            pass
-
-    def save_ext_task(self):
-        try:
-            name = self.ext_task_name_input.text()
-            desc = self.ext_task_desc_input.text()
-            if name:
-                item = QListWidgetItem(f"{name} - {desc}")
-                self.ext_backlog_list.addItem(item)
-                self.hide_ext_add_task_form()
-        except AttributeError:
-            pass
 
     def closeEvent(self, event):
         # Stop workers if they exist (ExtendedHUD may be used without creating internal workers)
@@ -1032,10 +1234,14 @@ class ExtendedHUD(QWidget):
         event.accept()
 
 
-class CyberPanel(QWidget):
+class CyberPanel(HudDataMixin, QWidget):
+    hud_task_prefix = ""
+
+    sheet_save_result = pyqtSignal(object, bool, str)
+
     def __init__(self):
         super().__init__()
-        
+
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnBottomHint)
         available_geometry = QApplication.primaryScreen().availableGeometry()
         self.setGeometry(available_geometry)
@@ -1222,7 +1428,11 @@ class CyberPanel(QWidget):
         self.page = QWebEnginePage(self.profile, self.browser)
         self.browser.setPage(self.page)
         self.page.setBackgroundColor(QColor("#101012"))
-        
+
+        self.page.loadFinished.connect(
+            lambda ok: self.hide_superset_header(self.page)
+            if ok and "superset" in self.browser.url().toString() else None
+        )
         self.browser.settings().setAttribute(QWebEngineSettings.WebAttribute.ForceDarkMode, True)
         self.browser.setUrl(QUrl("https://gemini.google.com/"))
         layout.addWidget(self.browser, 1)
@@ -1273,6 +1483,7 @@ class CyberPanel(QWidget):
         )
         self.open_superset_in_chrome(superset_urls[0])
 
+        layout.addWidget(right_panel)
         self.setLayout(layout)
 
         self.calendar_worker = CalendarWorker()
@@ -1280,6 +1491,8 @@ class CyberPanel(QWidget):
         self.calendar_worker.weather_ready.connect(self.weather_label.setText)
         self.calendar_worker.status_changed.connect(self.events_view.setPlainText)
         self.calendar_worker.start()
+
+        self.sheet_save_result.connect(self.on_sheet_save_result)
 
     def update_hardware_metrics(self):
         try:
@@ -1289,12 +1502,25 @@ class CyberPanel(QWidget):
             ram = psutil.virtual_memory()
             ram_used = ram.used / (1024 ** 3)
             ram_total = ram.total / (1024 ** 3)
-            
+
+            cpu_temp = "N/A"
+            try:
+                for entries in psutil.sensors_temperatures().values():
+                    for entry in entries:
+                        if entry.current:
+                            cpu_temp = f"{entry.current:.0f} C"
+                            break
+                    if cpu_temp != "N/A":
+                        break
+            except (AttributeError, OSError):
+                pass
+
             # Формирование Sci-Fi вывода
             telemetry = (
                 f"NODE TELEMETRY\n"
                 f"================\n"
                 f"CPU LOAD : {cpu_usage:04.1f}%\n"
+                f"CPU TEMP : {cpu_temp}\n"
                 f"RAM ALLOC: {ram_used:.1f} / {ram_total:.1f} GB\n"
                 f"RAM USAGE: {ram.percent:04.1f}%\n"
                 f"================\n"
@@ -1320,10 +1546,11 @@ class CyberPanel(QWidget):
         self.terminal.setFocus()
 
     def open_telegram(self):
-        executable = (
+        executable = os.getenv(
+            "TELEGRAM_EXE_PATH",
             "C:\\Program Files\\WindowsApps\\"
             "TelegramMessengerLLP.TelegramDesktop_7.0.9.0_x64__t4vj0pshhgkwm\\"
-            "Telegram.exe"
+            "Telegram.exe",
         )
         QProcess.startDetached("explorer.exe", [executable])
 
@@ -1331,11 +1558,15 @@ class CyberPanel(QWidget):
         QProcess.startDetached("explorer.exe", ["C:\\"])
 
     def open_chrome(self):
-        executable = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        executable = os.getenv(
+            "CHROME_EXE_PATH", r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        )
         QProcess.startDetached("explorer.exe", [executable])
 
     def open_superset_in_chrome(self, url):
-        executable = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        executable = os.getenv(
+            "CHROME_EXE_PATH", r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        )
         QProcess.startDetached("explorer.exe", [executable, url])
 
     def hide_superset_header(self, page):
@@ -1357,7 +1588,7 @@ class CyberPanel(QWidget):
         )
 
     def open_rdp(self):
-        rdp_file = r"C:\Users\Михаил\OneDrive\Desktop\227.rdp"
+        rdp_file = os.getenv("RDP_FILE_PATH", r"C:\Users\Михаил\OneDrive\Desktop\227.rdp")
         QProcess.startDetached("mstsc.exe", [rdp_file])
 
     def ask_telegram_code(self):
@@ -1576,83 +1807,15 @@ class CyberPanel(QWidget):
         
         return panel
 
-    def update_financial_data(self, data):
-        self.btc_indicator.value = data.get("btc_price", 0)
-        self.btc_indicator.change = data.get("btc_change", 0)
-        self.btc_indicator.update()
-        
-        self.uah_indicator.value = data.get("uah_rate", 0)
-        self.uah_indicator.update()
-
-    def update_tasks(self, sprint_tasks, backlog_tasks):
-        self.sprint_list.clear()
-        for task in sprint_tasks[:5]:
-            if len(task) >= 2:
-                item_text = f"{task[0]} ({task[1]})" if len(task) > 1 else task[0]
-                item = QListWidgetItem(item_text[:50])
-                self.sprint_list.addItem(item)
-        
-        self.backlog_list.clear()
-        for task in backlog_tasks[:5]:
-            if len(task) >= 1:
-                item_text = task[0]
-                item = QListWidgetItem(item_text[:50])
-                self.backlog_list.addItem(item)
-
-    def update_videos(self, videos):
-        self.video_list.clear()
-        if not videos:
-            self.video_list.addItem("NO VIDEOS — check YOUTUBE_API_KEY or network")
-            return
-        for title, video_id, thumbnail in videos:
-            item = QListWidgetItem(title[:40])
-            item.setData(Qt.ItemDataRole.UserRole, video_id)
-            self.video_list.addItem(item)
-
-    def play_video(self, item):
-        video_id = item.data(Qt.ItemDataRole.UserRole)
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        webbrowser.open(url)
-
-    def update_news(self, news_items):
-        self.news_carousel.set_news(news_items)
-        
-        self.news_list.clear()
-        if not news_items:
-            self.news_list.addItem("NO NEWS AVAILABLE")
-            return
-        for title, link, source in news_items:
-            item = QListWidgetItem(f"[{source}] {title[:35]}")
-            item.setData(Qt.ItemDataRole.UserRole, link)
-            self.news_list.addItem(item)
-
-    def open_news(self, item):
-        link = item.data(Qt.ItemDataRole.UserRole)
-        webbrowser.open(link)
-
-    def show_add_task_form(self):
-        self.task_form.show()
-        self.task_name_input.setFocus()
-
-    def hide_add_task_form(self):
-        self.task_form.hide()
-        self.task_name_input.clear()
-        self.task_desc_input.clear()
-
-    def save_task(self):
-        name = self.task_name_input.text()
-        desc = self.task_desc_input.text()
-        if name:
-            item = QListWidgetItem(f"{name[:30]} - {desc[:15]}")
-            self.backlog_list.addItem(item)
-            self.hide_add_task_form()
-
     def closeEvent(self, event):
         self.telegram_worker.stop()
         self.telegram_worker.wait(3000)
         self.calendar_worker.stop()
         self.calendar_worker.wait(3000)
         self.terminal.stop()
+
+        if hasattr(self, 'extended_hud_window'):
+            self.extended_hud_window.close()
         
         # Stop Extended HUD workers
         if hasattr(self, 'financial_worker'):
@@ -1672,6 +1835,12 @@ class CyberPanel(QWidget):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+
+    # One-time setup: show the form while any required key is missing
+    if missing_env_keys():
+        setup_dialog = FirstRunSetupDialog()
+        setup_dialog.exec()
+        load_dotenv(ENV_PATH, override=True)
 
     startup = QWidget()
     startup.setWindowFlags(Qt.WindowType.SplashScreen | Qt.WindowType.WindowStaysOnTopHint)
@@ -1693,6 +1862,16 @@ if __name__ == '__main__':
 
     panel = CyberPanel()
     panel.show()
+
+    # Second-monitor HUD, fed by the same workers as the embedded panel
+    extended_hud = ExtendedHUD()
+    panel.financial_worker.data_updated.connect(extended_hud.update_financial_data)
+    panel.tasks_worker.tasks_updated.connect(extended_hud.update_tasks)
+    panel.youtube_worker.videos_updated.connect(extended_hud.update_videos)
+    panel.news_worker.news_updated.connect(extended_hud.update_news)
+    panel.extended_hud_window = extended_hud
+    extended_hud.show()
+
     startup.raise_()
     QTimer.singleShot(1800, startup.close)
     sys.exit(app.exec())
