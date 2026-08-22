@@ -1,6 +1,7 @@
 import sys
 import os
 import asyncio
+import shutil
 import threading
 import json
 import subprocess
@@ -31,6 +32,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QListWidget,
     QListWidgetItem,
+    QFileDialog,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
@@ -46,7 +48,8 @@ from googleapiclient.discovery import build
 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --no-sandbox"
 
 GOOGLE_CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
-GOOGLE_SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+# Read-write scope so tasks added in the UI can be appended to the backlog sheet
+GOOGLE_SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 def is_wsl() -> bool:
@@ -72,6 +75,178 @@ def run_google_oauth(flow):
         finally:
             webbrowser.open = original_open
     return flow.run_local_server(port=0, open_browser=True)
+
+
+ENV_PATH = os.path.expanduser("~/.env")
+GOOGLE_CREDENTIALS_PATH = os.path.expanduser("~/google_credentials.json")
+
+SETUP_FIELDS = [
+    ("TELEGRAM_API_ID", "Telegram API ID", False),
+    ("TELEGRAM_API_HASH", "Telegram API Hash", False),
+    ("TELEGRAM_PHONE", "Telegram Phone (+380...)", False),
+    ("YOUTUBE_API_KEY", "YouTube Data API Key", False),
+    ("SPRINT_SHEET_ID", "Google Sheet ID — Sprint", False),
+    ("BACKLOG_SHEET_ID", "Google Sheet ID — Backlog", False),
+    ("TELEGRAM_EXE_PATH", "Telegram.exe path", True),
+    ("CHROME_EXE_PATH", "chrome.exe path", True),
+    ("RDP_FILE_PATH", "RDP file path", True),
+]
+
+REQUIRED_ENV_KEYS = [key for key, _, optional in SETUP_FIELDS if not optional]
+
+
+def missing_env_keys():
+    return [key for key in REQUIRED_ENV_KEYS if not os.getenv(key)]
+
+
+def save_env_values(values):
+    lines = []
+    if os.path.exists(ENV_PATH):
+        with open(ENV_PATH, "r", encoding="utf-8") as env_file:
+            lines = env_file.read().splitlines()
+    for key, value in values.items():
+        if not value:
+            continue
+        for index, line in enumerate(lines):
+            if line.startswith(f"{key}="):
+                lines[index] = f"{key}={value}"
+                break
+        else:
+            lines.append(f"{key}={value}")
+    with open(ENV_PATH, "w", encoding="utf-8") as env_file:
+        env_file.write("\n".join(lines) + "\n")
+
+
+class FirstRunSetupDialog(QDialog):
+    """One-time setup form shown on startup while required settings are missing."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("JARVIS — First Run Setup")
+        self.setMinimumWidth(520)
+        self.setStyleSheet(
+            """
+            QWidget {
+                color: #d6fff7;
+                background-color: #0b1113;
+                font-family: 'Cascadia Mono', 'DejaVu Sans Mono', monospace;
+            }
+            QLineEdit {
+                background-color: #101f21;
+                border: 1px solid #286e6b;
+                color: #b8eee4;
+                padding: 6px;
+                border-radius: 4px;
+            }
+            QPushButton {
+                color: #bffef1;
+                background-color: #142326;
+                border: 1px solid #286e6b;
+                border-radius: 6px;
+                padding: 7px 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                color: #071112;
+                background-color: #73f6de;
+            }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+
+        header = QLabel("SETUP REQUIRED\n\nEnter your keys below — they will be saved to ~/.env")
+        header.setStyleSheet("color: #73f6de; font-size: 13px; font-weight: bold;")
+        layout.addWidget(header)
+
+        self.inputs = {}
+        for key, label, optional in SETUP_FIELDS:
+            field_label = QLabel(f"{label}{' (optional)' if optional else ' *'}")
+            field_label.setStyleSheet("color: #9effef; font-size: 11px;")
+            layout.addWidget(field_label)
+            input_field = QLineEdit()
+            input_field.setText(os.getenv(key, ""))
+            self.inputs[key] = input_field
+            layout.addWidget(input_field)
+
+        credentials_row = QHBoxLayout()
+        credentials_exists = os.path.exists(GOOGLE_CREDENTIALS_PATH)
+        self.credentials_status = QLabel(
+            "google_credentials.json: FOUND" if credentials_exists
+            else "google_credentials.json: NOT FOUND"
+        )
+        self.credentials_status.setStyleSheet(
+            f"color: {'#73f6de' if credentials_exists else '#ff4444'}; font-size: 11px;"
+        )
+        browse_button = QPushButton("BROWSE...")
+        browse_button.clicked.connect(self.pick_credentials)
+        credentials_row.addWidget(self.credentials_status, 1)
+        credentials_row.addWidget(browse_button)
+        layout.addLayout(credentials_row)
+
+        buttons = QHBoxLayout()
+        save_button = QPushButton("SAVE && START")
+        save_button.clicked.connect(self.save_and_close)
+        skip_button = QPushButton("SKIP")
+        skip_button.clicked.connect(self.reject)
+        buttons.addWidget(save_button)
+        buttons.addWidget(skip_button)
+        layout.addLayout(buttons)
+
+    def pick_credentials(self):
+        source, _ = QFileDialog.getOpenFileName(
+            self, "Select google_credentials.json", os.path.expanduser("~"), "JSON files (*.json)"
+        )
+        if source:
+            shutil.copy(source, GOOGLE_CREDENTIALS_PATH)
+            self.credentials_status.setText("google_credentials.json: COPIED")
+            self.credentials_status.setStyleSheet("color: #73f6de; font-size: 11px;")
+
+    def save_and_close(self):
+        save_env_values({key: field.text().strip() for key, field in self.inputs.items()})
+        self.accept()
+
+
+def append_backlog_task(name, description):
+    """Append a task row to the backlog Google Sheet. Returns (ok, message)."""
+    backlog_sheet_id = os.getenv("BACKLOG_SHEET_ID", "")
+    if not backlog_sheet_id:
+        return False, "BACKLOG_SHEET_ID not set"
+    token_path = os.path.expanduser("~/.google_sheets_token.json")
+    credentials = None
+    if os.path.exists(token_path):
+        credentials = Credentials.from_authorized_user_file(token_path, GOOGLE_SHEETS_SCOPES)
+    if credentials and credentials.expired and credentials.refresh_token:
+        credentials.refresh(Request())
+    if not credentials or not credentials.valid:
+        return False, "Sheets not authorized (restart app to sign in)"
+    service = build("sheets", "v4", credentials=credentials)
+    try:
+        service.spreadsheets().values().append(
+            spreadsheetId=backlog_sheet_id,
+            range="A1",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": [[name, description, "Начало"]]},
+        ).execute()
+    except Exception as error:
+        if "insufficient" in str(error).lower() or "403" in str(error):
+            return False, "No write access: delete ~/.google_sheets_token.json and restart to re-auth"
+        raise
+    return True, "Saved to backlog sheet"
+
+
+def save_task_to_backlog_sheet(name, description, notifier, item):
+    """Save a task in the background; result arrives via notifier.sheet_save_result."""
+    def worker():
+        try:
+            ok, message = append_backlog_task(name, description)
+        except Exception as error:
+            ok, message = False, str(error)[:60]
+        notifier.sheet_save_result.emit(item, ok, message)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 # Extended HUD Data Workers
@@ -314,24 +489,35 @@ class NewsWorker(QThread):
             try:
                 news_items = []
                 
-                # Monitor AI news from major sources
+                # Monitor AI news from major sources via RSS/Atom feeds
                 sources = [
-                    ("https://techcrunch.com/tag/artificial-intelligence/", "TechCrunch AI"),
+                    ("https://techcrunch.com/category/artificial-intelligence/feed/", "TechCrunch AI"),
+                    ("https://feeds.arstechnica.com/arstechnica/technology-lab", "Ars Technica"),
+                    ("https://www.wired.com/feed/tag/ai/latest/rss", "Wired AI"),
+                    ("https://www.theverge.com/rss/ai-artificial-intelligence/index.xml", "The Verge AI"),
                 ]
-                
+
                 for url, source_name in sources:
                     try:
                         response = requests.get(url, timeout=10, headers={
                             "User-Agent": "Mozilla/5.0"
                         })
-                        soup = BeautifulSoup(response.content, "html.parser")
-                        
-                        for article in soup.find_all("a", class_="post-block__title__link")[:3]:
-                            title = article.get_text().strip()
-                            link = article.get("href", "")
+                        try:
+                            soup = BeautifulSoup(response.content, "xml")
+                        except Exception:
+                            soup = BeautifulSoup(response.content, "html.parser")
+
+                        # RSS uses <item>, Atom uses <entry> with <link href="..."/>
+                        for entry in soup.find_all(["item", "entry"])[:3]:
+                            title_tag = entry.find("title")
+                            link_tag = entry.find("link")
+                            title = title_tag.get_text().strip() if title_tag else ""
+                            link = ""
+                            if link_tag:
+                                link = link_tag.get("href") or link_tag.get_text().strip()
                             if title and link:
                                 news_items.append((title[:80], link, source_name))
-                    except:
+                    except Exception:
                         pass
                 
                 self.news_updated.emit(news_items)
@@ -711,9 +897,11 @@ class EmbeddedTerminal(QPlainTextEdit):
 
 class ExtendedHUD(QWidget):
     """Extended HUD for second monitor with task management, financial data, and news"""
-    
-    def __init__(self):
-        super().__init__()
+
+    sheet_save_result = pyqtSignal(object, bool, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self.setWindowTitle("Extended HUD")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnBottomHint)
         
@@ -761,9 +949,13 @@ class ExtendedHUD(QWidget):
             screen_geometry = screens[1].geometry()
             self.setGeometry(screen_geometry)
         else:
-            # Fallback: offset from primary screen
+            # Fallback: centered window on the primary screen
             primary_geometry = QApplication.primaryScreen().geometry()
-            self.setGeometry(primary_geometry.width(), 0, primary_geometry.width(), primary_geometry.height())
+            self.setGeometry(
+                max(0, primary_geometry.center().x() - 700),
+                max(0, primary_geometry.center().y() - 450),
+                1400, 900,
+            )
         
         # Main layout
         main_layout = QHBoxLayout()
@@ -783,7 +975,9 @@ class ExtendedHUD(QWidget):
         main_layout.addWidget(right_panel, 1)
         
         self.setLayout(main_layout)
-        
+
+        self.sheet_save_result.connect(self.on_sheet_save_result)
+
         # Workers are started by the main application; ExtendedHUD will receive updates via connected signals.
         self.status_label = QLabel("EXTENDED HUD: IDLE")
         self.status_label.setStyleSheet("color: #b8eee4;")
@@ -876,8 +1070,9 @@ class ExtendedHUD(QWidget):
         
         self.ext_video_list = QListWidget()
         self.ext_video_list.setMaximumHeight(150)
+        self.ext_video_list.itemDoubleClicked.connect(self.play_video)
         layout.addWidget(self.ext_video_list)
-        
+
         layout.addStretch()
         return panel
 
@@ -900,6 +1095,7 @@ class ExtendedHUD(QWidget):
         news_scroll.setStyleSheet("QScrollArea { background-color: #0d1719; border: 1px solid #286e6b; }")
         
         self.ext_news_list = QListWidget()
+        self.ext_news_list.itemClicked.connect(self.open_news)
         news_scroll.setWidget(self.ext_news_list)
         layout.addWidget(news_scroll, 1)
         
@@ -947,8 +1143,6 @@ class ExtendedHUD(QWidget):
                 item = QListWidgetItem(title[:60])
                 item.setData(Qt.ItemDataRole.UserRole, video_id)
                 self.ext_video_list.addItem(item)
-            if self.ext_video_list.count() > 0:
-                self.ext_video_list.itemDoubleClicked.connect(self.play_video)
         except AttributeError:
             pass
 
@@ -968,8 +1162,6 @@ class ExtendedHUD(QWidget):
                 item = QListWidgetItem(f"[{source}] {title}")
                 item.setData(Qt.ItemDataRole.UserRole, link)
                 self.ext_news_list.addItem(item)
-            if self.ext_news_list.count() > 0:
-                self.ext_news_list.itemClicked.connect(self.open_news)
         except AttributeError:
             pass
 
@@ -1000,8 +1192,15 @@ class ExtendedHUD(QWidget):
                 item = QListWidgetItem(f"{name} - {desc}")
                 self.ext_backlog_list.addItem(item)
                 self.hide_ext_add_task_form()
+                save_task_to_backlog_sheet(name, desc, self, item)
         except AttributeError:
             pass
+
+    def on_sheet_save_result(self, item, ok, message):
+        if ok:
+            item.setText(f"{item.text()} ✓")
+        else:
+            item.setText(f"⚠ NOT SAVED ({message}): {item.text()}")
 
     def closeEvent(self, event):
         # Stop workers if they exist (ExtendedHUD may be used without creating internal workers)
@@ -1033,9 +1232,11 @@ class ExtendedHUD(QWidget):
 
 
 class CyberPanel(QWidget):
+    sheet_save_result = pyqtSignal(object, bool, str)
+
     def __init__(self):
         super().__init__()
-        
+
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnBottomHint)
         available_geometry = QApplication.primaryScreen().availableGeometry()
         self.setGeometry(available_geometry)
@@ -1222,7 +1423,11 @@ class CyberPanel(QWidget):
         self.page = QWebEnginePage(self.profile, self.browser)
         self.browser.setPage(self.page)
         self.page.setBackgroundColor(QColor("#101012"))
-        
+
+        self.page.loadFinished.connect(
+            lambda ok: self.hide_superset_header(self.page)
+            if ok and "superset" in self.browser.url().toString() else None
+        )
         self.browser.settings().setAttribute(QWebEngineSettings.WebAttribute.ForceDarkMode, True)
         self.browser.setUrl(QUrl("https://gemini.google.com/"))
         layout.addWidget(self.browser, 1)
@@ -1273,6 +1478,7 @@ class CyberPanel(QWidget):
         )
         self.open_superset_in_chrome(superset_urls[0])
 
+        layout.addWidget(right_panel)
         self.setLayout(layout)
 
         self.calendar_worker = CalendarWorker()
@@ -1280,6 +1486,8 @@ class CyberPanel(QWidget):
         self.calendar_worker.weather_ready.connect(self.weather_label.setText)
         self.calendar_worker.status_changed.connect(self.events_view.setPlainText)
         self.calendar_worker.start()
+
+        self.sheet_save_result.connect(self.on_sheet_save_result)
 
     def update_hardware_metrics(self):
         try:
@@ -1289,12 +1497,25 @@ class CyberPanel(QWidget):
             ram = psutil.virtual_memory()
             ram_used = ram.used / (1024 ** 3)
             ram_total = ram.total / (1024 ** 3)
-            
+
+            cpu_temp = "N/A"
+            try:
+                for entries in psutil.sensors_temperatures().values():
+                    for entry in entries:
+                        if entry.current:
+                            cpu_temp = f"{entry.current:.0f} C"
+                            break
+                    if cpu_temp != "N/A":
+                        break
+            except (AttributeError, OSError):
+                pass
+
             # Формирование Sci-Fi вывода
             telemetry = (
                 f"NODE TELEMETRY\n"
                 f"================\n"
                 f"CPU LOAD : {cpu_usage:04.1f}%\n"
+                f"CPU TEMP : {cpu_temp}\n"
                 f"RAM ALLOC: {ram_used:.1f} / {ram_total:.1f} GB\n"
                 f"RAM USAGE: {ram.percent:04.1f}%\n"
                 f"================\n"
@@ -1320,10 +1541,11 @@ class CyberPanel(QWidget):
         self.terminal.setFocus()
 
     def open_telegram(self):
-        executable = (
+        executable = os.getenv(
+            "TELEGRAM_EXE_PATH",
             "C:\\Program Files\\WindowsApps\\"
             "TelegramMessengerLLP.TelegramDesktop_7.0.9.0_x64__t4vj0pshhgkwm\\"
-            "Telegram.exe"
+            "Telegram.exe",
         )
         QProcess.startDetached("explorer.exe", [executable])
 
@@ -1331,11 +1553,15 @@ class CyberPanel(QWidget):
         QProcess.startDetached("explorer.exe", ["C:\\"])
 
     def open_chrome(self):
-        executable = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        executable = os.getenv(
+            "CHROME_EXE_PATH", r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        )
         QProcess.startDetached("explorer.exe", [executable])
 
     def open_superset_in_chrome(self, url):
-        executable = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        executable = os.getenv(
+            "CHROME_EXE_PATH", r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        )
         QProcess.startDetached("explorer.exe", [executable, url])
 
     def hide_superset_header(self, page):
@@ -1357,7 +1583,7 @@ class CyberPanel(QWidget):
         )
 
     def open_rdp(self):
-        rdp_file = r"C:\Users\Михаил\OneDrive\Desktop\227.rdp"
+        rdp_file = os.getenv("RDP_FILE_PATH", r"C:\Users\Михаил\OneDrive\Desktop\227.rdp")
         QProcess.startDetached("mstsc.exe", [rdp_file])
 
     def ask_telegram_code(self):
@@ -1646,6 +1872,13 @@ class CyberPanel(QWidget):
             item = QListWidgetItem(f"{name[:30]} - {desc[:15]}")
             self.backlog_list.addItem(item)
             self.hide_add_task_form()
+            save_task_to_backlog_sheet(name, desc, self, item)
+
+    def on_sheet_save_result(self, item, ok, message):
+        if ok:
+            item.setText(f"{item.text()} ✓")
+        else:
+            item.setText(f"⚠ NOT SAVED ({message}): {item.text()}")
 
     def closeEvent(self, event):
         self.telegram_worker.stop()
@@ -1653,6 +1886,9 @@ class CyberPanel(QWidget):
         self.calendar_worker.stop()
         self.calendar_worker.wait(3000)
         self.terminal.stop()
+
+        if hasattr(self, 'extended_hud_window'):
+            self.extended_hud_window.close()
         
         # Stop Extended HUD workers
         if hasattr(self, 'financial_worker'):
@@ -1672,6 +1908,12 @@ class CyberPanel(QWidget):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
+
+    # One-time setup: show the form while any required key is missing
+    if missing_env_keys():
+        setup_dialog = FirstRunSetupDialog()
+        setup_dialog.exec()
+        load_dotenv(ENV_PATH, override=True)
 
     startup = QWidget()
     startup.setWindowFlags(Qt.WindowType.SplashScreen | Qt.WindowType.WindowStaysOnTopHint)
@@ -1693,6 +1935,16 @@ if __name__ == '__main__':
 
     panel = CyberPanel()
     panel.show()
+
+    # Second-monitor HUD, fed by the same workers as the embedded panel
+    extended_hud = ExtendedHUD()
+    panel.financial_worker.data_updated.connect(extended_hud.update_financial_data)
+    panel.tasks_worker.tasks_updated.connect(extended_hud.update_tasks)
+    panel.youtube_worker.videos_updated.connect(extended_hud.update_videos)
+    panel.news_worker.news_updated.connect(extended_hud.update_news)
+    panel.extended_hud_window = extended_hud
+    extended_hud.show()
+
     startup.raise_()
     QTimer.singleShot(1800, startup.close)
     sys.exit(app.exec())
