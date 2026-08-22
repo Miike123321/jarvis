@@ -895,8 +895,111 @@ class EmbeddedTerminal(QPlainTextEdit):
                 self.process.kill()
 
 
-class ExtendedHUD(QWidget):
+class HudDataMixin:
+    """Shared update handlers for HUD panels (financial, tasks, videos, news, task form).
+
+    Classes using this mixin must define the widget attributes referenced below.
+    """
+
+    hud_task_limit = 5
+    hud_item_max_len = 50
+    hud_title_max_len = 40
+    hud_news_title_max_len = 35
+    hud_use_carousel = True
+    hud_task_prefix = "ext_"
+
+    def _hud_attr(self, name):
+        return getattr(self, f"{self.hud_task_prefix}{name}")
+
+    def update_financial_data(self, data):
+        self.btc_indicator.value = data.get("btc_price", 0)
+        self.btc_indicator.change = data.get("btc_change", 0)
+        self.btc_indicator.update()
+
+        self.uah_indicator.value = data.get("uah_rate", 0)
+        self.uah_indicator.update()
+
+    def update_tasks(self, sprint_tasks, backlog_tasks):
+        sprint_list = self._hud_attr("sprint_list")
+        backlog_list = self._hud_attr("backlog_list")
+
+        sprint_list.clear()
+        for task in sprint_tasks[:self.hud_task_limit]:
+            if len(task) >= 2:
+                item_text = f"{task[0]} ({task[1]})" if len(task) > 1 else task[0]
+                sprint_list.addItem(QListWidgetItem(item_text[:self.hud_item_max_len]))
+
+        backlog_list.clear()
+        for task in backlog_tasks[:self.hud_task_limit]:
+            if len(task) >= 1:
+                backlog_list.addItem(QListWidgetItem(task[0][:self.hud_item_max_len]))
+
+    def update_videos(self, videos):
+        video_list = self._hud_attr("video_list")
+        video_list.clear()
+        if not videos:
+            video_list.addItem("NO VIDEOS — check YOUTUBE_API_KEY or network")
+            return
+        for title, video_id, thumbnail in videos:
+            item = QListWidgetItem(title[:self.hud_title_max_len])
+            item.setData(Qt.ItemDataRole.UserRole, video_id)
+            video_list.addItem(item)
+
+    def play_video(self, item):
+        video_id = item.data(Qt.ItemDataRole.UserRole)
+        webbrowser.open(f"https://www.youtube.com/watch?v={video_id}")
+
+    def update_news(self, news_items):
+        if self.hud_use_carousel:
+            self._hud_attr("news_carousel").set_news(news_items)
+
+        news_list = self._hud_attr("news_list")
+        news_list.clear()
+        if not news_items:
+            news_list.addItem("NO NEWS AVAILABLE")
+            return
+        for title, link, source in news_items:
+            item = QListWidgetItem(f"[{source}] {title[:self.hud_news_title_max_len]}")
+            item.setData(Qt.ItemDataRole.UserRole, link)
+            news_list.addItem(item)
+
+    def open_news(self, item):
+        link = item.data(Qt.ItemDataRole.UserRole)
+        webbrowser.open(link)
+
+    def show_add_task_form(self):
+        self._hud_attr("task_form").show()
+        self._hud_attr("task_name_input").setFocus()
+
+    def hide_add_task_form(self):
+        self._hud_attr("task_form").hide()
+        self._hud_attr("task_name_input").clear()
+        self._hud_attr("task_desc_input").clear()
+
+    def save_task(self):
+        name = self._hud_attr("task_name_input").text()
+        desc = self._hud_attr("task_desc_input").text()
+        if name:
+            item = QListWidgetItem(f"{name[:30]} - {desc[:15]}")
+            self._hud_attr("backlog_list").addItem(item)
+            self.hide_add_task_form()
+            save_task_to_backlog_sheet(name, desc, self, item)
+
+    def on_sheet_save_result(self, item, ok, message):
+        if ok:
+            item.setText(f"{item.text()} ✓")
+        else:
+            item.setText(f"⚠ NOT SAVED ({message}): {item.text()}")
+
+
+class ExtendedHUD(HudDataMixin, QWidget):
     """Extended HUD for second monitor with task management, financial data, and news"""
+
+    hud_task_limit = 10
+    hud_item_max_len = 10_000  # extended HUD shows full task text
+    hud_title_max_len = 60
+    hud_news_title_max_len = 10_000  # full headlines
+    hud_task_prefix = "ext_"
 
     sheet_save_result = pyqtSignal(object, bool, str)
 
@@ -1012,7 +1115,7 @@ class ExtendedHUD(QWidget):
         layout.addSpacing(10)
         
         add_task_btn = QPushButton("+ ДОБАВИТЬ В БЭКЛОГ")
-        add_task_btn.clicked.connect(self.show_ext_add_task_form)
+        add_task_btn.clicked.connect(self.show_add_task_form)
         layout.addWidget(add_task_btn)
         
         self.ext_task_form = QWidget()
@@ -1031,9 +1134,9 @@ class ExtendedHUD(QWidget):
         
         form_buttons = QHBoxLayout()
         save_btn = QPushButton("СОХР")
-        save_btn.clicked.connect(self.save_ext_task)
+        save_btn.clicked.connect(self.save_task)
         cancel_btn = QPushButton("ОТМЕН")
-        cancel_btn.clicked.connect(self.hide_ext_add_task_form)
+        cancel_btn.clicked.connect(self.hide_add_task_form)
         form_buttons.addWidget(save_btn)
         form_buttons.addWidget(cancel_btn)
         task_form_layout.addLayout(form_buttons)
@@ -1102,106 +1205,6 @@ class ExtendedHUD(QWidget):
         layout.addStretch()
         return panel
 
-    def update_financial_data(self, data):
-        self.btc_indicator.value = data.get("btc_price", 0)
-        self.btc_indicator.change = data.get("btc_change", 0)
-        self.btc_indicator.update()
-        
-        self.uah_indicator.value = data.get("uah_rate", 0)
-        self.uah_indicator.update()
-
-    def update_tasks(self, sprint_tasks, backlog_tasks):
-        # Extended HUD lists
-        try:
-            self.ext_sprint_list.clear()
-            for task in sprint_tasks[:10]:
-                if len(task) >= 2:
-                    item_text = f"{task[0]} ({task[1]})" if len(task) > 1 else task[0]
-                    item = QListWidgetItem(item_text)
-                    self.ext_sprint_list.addItem(item)
-        except AttributeError:
-            pass
-        
-        try:
-            self.ext_backlog_list.clear()
-            for task in backlog_tasks[:10]:
-                if len(task) >= 1:
-                    item_text = task[0]
-                    item = QListWidgetItem(item_text)
-                    self.ext_backlog_list.addItem(item)
-        except AttributeError:
-            pass
-
-    def update_videos(self, videos):
-        # Extended HUD video list
-        try:
-            self.ext_video_list.clear()
-            if not videos:
-                self.ext_video_list.addItem("NO VIDEOS — check YOUTUBE_API_KEY or network")
-                return
-            for title, video_id, thumbnail in videos:
-                item = QListWidgetItem(title[:60])
-                item.setData(Qt.ItemDataRole.UserRole, video_id)
-                self.ext_video_list.addItem(item)
-        except AttributeError:
-            pass
-
-    def play_video(self, item):
-        video_id = item.data(Qt.ItemDataRole.UserRole)
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        webbrowser.open(url)
-
-    def update_news(self, news_items):
-        try:
-            self.ext_news_carousel.set_news(news_items)
-            self.ext_news_list.clear()
-            if not news_items:
-                self.ext_news_list.addItem("NO NEWS AVAILABLE")
-                return
-            for title, link, source in news_items:
-                item = QListWidgetItem(f"[{source}] {title}")
-                item.setData(Qt.ItemDataRole.UserRole, link)
-                self.ext_news_list.addItem(item)
-        except AttributeError:
-            pass
-
-    def open_news(self, item):
-        link = item.data(Qt.ItemDataRole.UserRole)
-        webbrowser.open(link)
-
-    def show_ext_add_task_form(self):
-        try:
-            self.ext_task_form.show()
-            self.ext_task_name_input.setFocus()
-        except AttributeError:
-            pass
-
-    def hide_ext_add_task_form(self):
-        try:
-            self.ext_task_form.hide()
-            self.ext_task_name_input.clear()
-            self.ext_task_desc_input.clear()
-        except AttributeError:
-            pass
-
-    def save_ext_task(self):
-        try:
-            name = self.ext_task_name_input.text()
-            desc = self.ext_task_desc_input.text()
-            if name:
-                item = QListWidgetItem(f"{name} - {desc}")
-                self.ext_backlog_list.addItem(item)
-                self.hide_ext_add_task_form()
-                save_task_to_backlog_sheet(name, desc, self, item)
-        except AttributeError:
-            pass
-
-    def on_sheet_save_result(self, item, ok, message):
-        if ok:
-            item.setText(f"{item.text()} ✓")
-        else:
-            item.setText(f"⚠ NOT SAVED ({message}): {item.text()}")
-
     def closeEvent(self, event):
         # Stop workers if they exist (ExtendedHUD may be used without creating internal workers)
         if hasattr(self, 'financial_worker'):
@@ -1231,7 +1234,9 @@ class ExtendedHUD(QWidget):
         event.accept()
 
 
-class CyberPanel(QWidget):
+class CyberPanel(HudDataMixin, QWidget):
+    hud_task_prefix = ""
+
     sheet_save_result = pyqtSignal(object, bool, str)
 
     def __init__(self):
@@ -1801,84 +1806,6 @@ class CyberPanel(QWidget):
         self.news_worker.start()
         
         return panel
-
-    def update_financial_data(self, data):
-        self.btc_indicator.value = data.get("btc_price", 0)
-        self.btc_indicator.change = data.get("btc_change", 0)
-        self.btc_indicator.update()
-        
-        self.uah_indicator.value = data.get("uah_rate", 0)
-        self.uah_indicator.update()
-
-    def update_tasks(self, sprint_tasks, backlog_tasks):
-        self.sprint_list.clear()
-        for task in sprint_tasks[:5]:
-            if len(task) >= 2:
-                item_text = f"{task[0]} ({task[1]})" if len(task) > 1 else task[0]
-                item = QListWidgetItem(item_text[:50])
-                self.sprint_list.addItem(item)
-        
-        self.backlog_list.clear()
-        for task in backlog_tasks[:5]:
-            if len(task) >= 1:
-                item_text = task[0]
-                item = QListWidgetItem(item_text[:50])
-                self.backlog_list.addItem(item)
-
-    def update_videos(self, videos):
-        self.video_list.clear()
-        if not videos:
-            self.video_list.addItem("NO VIDEOS — check YOUTUBE_API_KEY or network")
-            return
-        for title, video_id, thumbnail in videos:
-            item = QListWidgetItem(title[:40])
-            item.setData(Qt.ItemDataRole.UserRole, video_id)
-            self.video_list.addItem(item)
-
-    def play_video(self, item):
-        video_id = item.data(Qt.ItemDataRole.UserRole)
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        webbrowser.open(url)
-
-    def update_news(self, news_items):
-        self.news_carousel.set_news(news_items)
-        
-        self.news_list.clear()
-        if not news_items:
-            self.news_list.addItem("NO NEWS AVAILABLE")
-            return
-        for title, link, source in news_items:
-            item = QListWidgetItem(f"[{source}] {title[:35]}")
-            item.setData(Qt.ItemDataRole.UserRole, link)
-            self.news_list.addItem(item)
-
-    def open_news(self, item):
-        link = item.data(Qt.ItemDataRole.UserRole)
-        webbrowser.open(link)
-
-    def show_add_task_form(self):
-        self.task_form.show()
-        self.task_name_input.setFocus()
-
-    def hide_add_task_form(self):
-        self.task_form.hide()
-        self.task_name_input.clear()
-        self.task_desc_input.clear()
-
-    def save_task(self):
-        name = self.task_name_input.text()
-        desc = self.task_desc_input.text()
-        if name:
-            item = QListWidgetItem(f"{name[:30]} - {desc[:15]}")
-            self.backlog_list.addItem(item)
-            self.hide_add_task_form()
-            save_task_to_backlog_sheet(name, desc, self, item)
-
-    def on_sheet_save_result(self, item, ok, message):
-        if ok:
-            item.setText(f"{item.text()} ✓")
-        else:
-            item.setText(f"⚠ NOT SAVED ({message}): {item.text()}")
 
     def closeEvent(self, event):
         self.telegram_worker.stop()
