@@ -38,6 +38,14 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
+from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+from PyQt6.QtGui import QSurfaceFormat
+from OpenGL.GL import (
+    glClear, glClearColor, glColor4f, glPointSize, glBegin, glEnd, glVertex3f,
+    glMatrixMode, glLoadIdentity, glRotatef, glTranslatef, glEnable, glBlendFunc,
+    GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_PROJECTION, GL_MODELVIEW,
+    GL_POINTS, GL_BLEND, GL_SRC_ALPHA, GL_ONE, glLoadMatrixf,
+)
 from PyQt6.QtGui import QIcon, QPixmap, QColor, QPainter, QPen, QFont, QPolygon
 from PyQt6.QtCore import Qt, QUrl, QTimer, QThread, QProcess, QProcessEnvironment, QSize, pyqtSignal, QPoint, QRect
 from telethon import TelegramClient
@@ -1033,6 +1041,81 @@ class HudRingCenterpiece(QWidget):
         painter.drawEllipse(center, 5, 5)
 
 
+class NeonSphereWidget(QOpenGLWidget):
+    """Rotating neon particle globe (mockup centerpiece)."""
+
+    def __init__(self, parent=None, points=420):
+        fmt = QSurfaceFormat()
+        fmt.setSamples(4)
+        QSurfaceFormat.setDefaultFormat(fmt)
+        super().__init__(parent)
+        self.angle = 0.0
+        self.setMinimumSize(220, 220)
+        # Fibonacci-distributed points on a unit sphere
+        self._pts = []
+        golden = math.pi * (3.0 - math.sqrt(5.0))
+        for i in range(points):
+            y = 1.0 - (i / float(points - 1)) * 2.0
+            r = math.sqrt(max(0.0, 1.0 - y * y))
+            theta = golden * i
+            self._pts.append((math.cos(theta) * r, y, math.sin(theta) * r))
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(40)
+
+    def _tick(self):
+        self.angle = (self.angle + 0.6) % 360.0
+        self.update()
+
+    def initializeGL(self):
+        glClearColor(0.039, 0.051, 0.063, 1.0)  # match NEON_BACKGROUND
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE)
+
+    def resizeGL(self, w, h):
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        aspect = (w / h) if h else 1.0
+        f = 1.0 / math.tan(math.radians(45.0) / 2.0)
+        near, far = 0.1, 100.0
+        m = [0.0] * 16
+        m[0] = f / aspect
+        m[5] = f
+        m[10] = (far + near) / (near - far)
+        m[11] = -1.0
+        m[14] = (2.0 * far * near) / (near - far)
+        glLoadMatrixf(m)
+        glMatrixMode(GL_MODELVIEW)
+
+    def paintGL(self):
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glLoadIdentity()
+        glTranslatef(0.0, 0.0, -2.6)
+        glRotatef(self.angle, 0.0, 1.0, 0.0)
+        glRotatef(18.0, 1.0, 0.0, 0.0)
+
+        cyan = self._rgba(ACCENT_CYAN)
+        orange = self._rgba(ACCENT_ORANGE)
+        n = len(self._pts)
+        # two passes: soft glow then bright core
+        for size, alpha in ((7.0, 0.18), (3.0, 0.9)):
+            glPointSize(size)
+            glBegin(GL_POINTS)
+            for i, (x, y, z) in enumerate(self._pts):
+                base = cyan if (i % 11) else orange
+                # fade points on the far side for depth
+                depth = (z + 1.0) * 0.5
+                a = alpha * (0.25 + 0.75 * depth)
+                glColor4f(base[0], base[1], base[2], a)
+                glVertex3f(x, y, z)
+            glEnd()
+
+    @staticmethod
+    def _rgba(hex_color):
+        h = hex_color.lstrip('#')
+        return tuple(int(h[i:i+2], 16) / 255.0 for i in (0, 2, 4))
+
+
 class HudGauge(QWidget):
     """CPU/RAM gauge in the same neon ring style as RadialIndicator."""
     def __init__(self, title, value, suffix="%", parent=None):
@@ -1408,9 +1491,9 @@ class ExtendedHUD(HudDataMixin, QWidget):
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
         
-        ring = HudRingCenterpiece()
-        ring.setMaximumHeight(240)
-        layout.addWidget(ring, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.ext_sphere = NeonSphereWidget()
+        self.ext_sphere.setMaximumHeight(280)
+        layout.addWidget(self.ext_sphere, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.ext_news_carousel = NewsCarousel()
         layout.addWidget(self.ext_news_carousel)
