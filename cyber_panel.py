@@ -93,6 +93,106 @@ SETUP_FIELDS = [
 ]
 
 REQUIRED_ENV_KEYS = [key for key, _, optional in SETUP_FIELDS if not optional]
+# ===== Step 1 redesign: shared neon theme (cyan/orange, glow-edged panels) =====
+NEON_BACKGROUND = "#0a0d10"
+NEON_TEXT = "#d9fff8"
+NEON_MUTED = "#8fd8cc"
+ACCENT_CYAN = "#3ef2e6"
+ACCENT_CYAN_DIM = "#1c8f87"
+ACCENT_ORANGE = "#ff9a3c"
+PANEL_FILL = "#0e1517"
+
+HUD_THEME_STYLESHEET = f"""
+    QWidget {{
+        color: {NEON_TEXT};
+        background-color: {NEON_BACKGROUND};
+        font-family: 'Cascadia Mono', 'DejaVu Sans Mono', monospace;
+    }}
+    QLabel#sectionTitle {{
+        color: {ACCENT_CYAN};
+        font-size: 12px;
+        font-weight: bold;
+        letter-spacing: 2px;
+        padding: 4px 0;
+    }}
+    QLabel#panelTitle {{
+        color: {NEON_TEXT};
+        font-size: 18px;
+        font-weight: bold;
+        padding: 2px 0 8px;
+    }}
+    QPushButton {{
+        color: {ACCENT_CYAN};
+        background-color: transparent;
+        border: 2px solid {ACCENT_CYAN_DIM};
+        border-radius: 8px;
+        padding: 7px 14px;
+        font-weight: bold;
+    }}
+    QPushButton:hover {{
+        color: {NEON_BACKGROUND};
+        background-color: {ACCENT_CYAN};
+        border-color: {ACCENT_CYAN};
+    }}
+    QPushButton:pressed {{ background-color: {ACCENT_CYAN_DIM}; }}
+    QListWidget {{
+        background-color: {PANEL_FILL};
+        border: 1px solid {ACCENT_CYAN_DIM};
+        border-radius: 6px;
+        color: {NEON_TEXT};
+        selection-color: {NEON_BACKGROUND};
+        selection-background-color: {ACCENT_CYAN};
+    }}
+    QListWidget::item {{ padding: 3px; }}
+    QLineEdit {{
+        background-color: {PANEL_FILL};
+        border: 1px solid {ACCENT_CYAN_DIM};
+        border-radius: 5px;
+        padding: 6px;
+        color: {NEON_TEXT};
+    }}
+    QPlainTextEdit, QScrollArea {{
+        background-color: {PANEL_FILL};
+        border: 1px solid {ACCENT_CYAN_DIM};
+        border-radius: 8px;
+    }}
+    QScrollBar:vertical, QScrollBar:horizontal {{
+        background: {PANEL_FILL};
+        border-radius: 6px;
+        margin: 2px;
+    }}
+    QScrollBar:vertical {{ width: 10px; }}
+    QScrollBar:horizontal {{ height: 10px; }}
+    QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+        background: {ACCENT_CYAN_DIM};
+        border-radius: 5px;
+        min-height: 24px;
+        min-width: 24px;
+    }}
+    QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
+        background: {ACCENT_CYAN};
+    }}
+    QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+    QCheckBox {{ color: {NEON_TEXT}; spacing: 6px; }}
+    QCheckBox::indicator {{
+        width: 14px; height: 14px;
+        border: 1px solid {ACCENT_CYAN_DIM};
+        border-radius: 3px;
+        background: {PANEL_FILL};
+    }}
+    QCheckBox::indicator:checked {{ background: {ACCENT_CYAN}; }}
+"""
+
+
+def panel_style(object_name=None, pad=10):
+    """Rounded neon-edged panel style, theme-consistent."""
+    sel = f"#{object_name}" if object_name else "QWidget"
+    return (
+        f"{sel} {{ background-color: {PANEL_FILL}; "
+        f"border: 2px solid {ACCENT_CYAN}; border-radius: 14px; padding: {pad}px; }}"
+        if object_name
+        else f"background-color: {PANEL_FILL}; border: 2px solid {ACCENT_CYAN}; border-radius: 14px;"
+    )
 
 
 def missing_env_keys():
@@ -1008,43 +1108,7 @@ class ExtendedHUD(HudDataMixin, QWidget):
         self.setWindowTitle("Extended HUD")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnBottomHint)
         
-        self.setStyleSheet("""
-            QWidget {
-                color: #d6fff7;
-                background-color: #0b1113;
-                font-family: 'Cascadia Mono', 'DejaVu Sans Mono', monospace;
-            }
-            QLabel#sectionTitle {
-                color: #73f6de;
-                font-size: 11px;
-                font-weight: bold;
-                letter-spacing: 1px;
-            }
-            QPushButton {
-                color: #bffef1;
-                background-color: #142326;
-                border: 1px solid #286e6b;
-                border-radius: 6px;
-                padding: 6px 10px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #73f6de;
-                color: #071112;
-            }
-            QListWidget {
-                background-color: #0d1719;
-                border: 1px solid #286e6b;
-                color: #b8eee4;
-            }
-            QLineEdit {
-                background-color: #101f21;
-                border: 1px solid #286e6b;
-                color: #b8eee4;
-                padding: 6px;
-                border-radius: 4px;
-            }
-        """)
+        self.setStyleSheet(HUD_THEME_STYLESHEET)
         
         # Setup for second monitor
         screens = QApplication.screens()
@@ -1088,7 +1152,7 @@ class ExtendedHUD(HudDataMixin, QWidget):
 
     def create_task_panel(self):
         panel = QWidget()
-        panel.setStyleSheet("background-color: #0e191b; border: 1px solid #1f4f4e; border-radius: 12px; padding: 12px;")
+        panel.setStyleSheet(panel_style(pad=12))
         layout = QVBoxLayout(panel)
         
         title = QLabel("SPRINT ИМ")
@@ -1149,7 +1213,7 @@ class ExtendedHUD(HudDataMixin, QWidget):
 
     def create_financial_panel(self):
         panel = QWidget()
-        panel.setStyleSheet("background-color: #0e191b; border: 1px solid #1f4f4e; border-radius: 12px; padding: 12px;")
+        panel.setStyleSheet(panel_style(pad=12))
         layout = QVBoxLayout(panel)
         
         title = QLabel("FINANCIAL TERMINAL")
@@ -1181,7 +1245,7 @@ class ExtendedHUD(HudDataMixin, QWidget):
 
     def create_news_panel(self):
         panel = QWidget()
-        panel.setStyleSheet("background-color: #0e191b; border: 1px solid #1f4f4e; border-radius: 12px; padding: 12px;")
+        panel.setStyleSheet(panel_style(pad=12))
         layout = QVBoxLayout(panel)
         
         title = QLabel("NEWS HUB")
@@ -1247,51 +1311,8 @@ class CyberPanel(QWidget):
         )
         self.setMinimumSize(900, 560)
         self.move(available_geometry.topLeft())
+        self.setStyleSheet(HUD_THEME_STYLESHEET)
         
-        self.setStyleSheet(
-            """
-            QWidget {
-                color: #d6fff7;
-                background-color: #0b1113;
-                font-family: 'Cascadia Mono', 'DejaVu Sans Mono', monospace;
-            }
-            QLabel#sectionTitle {
-                color: #73f6de;
-                font-size: 11px;
-                font-weight: bold;
-                letter-spacing: 1px;
-                padding: 4px 0;
-            }
-            QLabel#panelTitle {
-                color: #d8fff8;
-                font-size: 18px;
-                font-weight: bold;
-                padding: 2px 0 8px;
-            }
-            QPushButton {
-                color: #bffef1;
-                background-color: #142326;
-                border: 1px solid #286e6b;
-                border-radius: 6px;
-                padding: 7px 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                color: #071112;
-                background-color: #73f6de;
-                border-color: #b8fff4;
-            }
-            QPushButton:pressed { background-color: #42b9ac; }
-            QPlainTextEdit {
-                color: #b8eee4;
-                background-color: #0d1719;
-                border: 1px solid #286e6b;
-                border-radius: 8px;
-                padding: 10px;
-                selection-background-color: #286e6b;
-            }
-            """
-        )
 
         # Scrollable content container so the panel never clips on small screens
         scroll_area = QScrollArea()
@@ -1310,7 +1331,7 @@ class CyberPanel(QWidget):
         metrics_panel.setFixedWidth(360)
         metrics_panel.setObjectName("metricsPanel")
         metrics_panel.setStyleSheet(
-            "#metricsPanel { background-color: #0e191b; border: 1px solid #1f4f4e; border-radius: 12px; padding: 8px; }"
+            panel_style("metricsPanel", pad=8)
         )
         metrics_layout = QVBoxLayout(metrics_panel)
         metrics_layout.setContentsMargins(14, 12, 14, 12)
@@ -1459,7 +1480,7 @@ class CyberPanel(QWidget):
         right_panel.setFixedWidth(520)
         right_panel.setObjectName("rightPanel")
         right_panel.setStyleSheet(
-            "#rightPanel { background-color: #0e191b; border: 1px solid #1f4f4e; border-radius: 12px; padding: 8px; }"
+            panel_style("rightPanel", pad=8)
         )
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(14, 12, 14, 12)
