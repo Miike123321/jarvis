@@ -125,6 +125,13 @@ HUD_THEME_STYLESHEET = f"""
         letter-spacing: 2px;
         padding: 4px 0;
     }}
+    QLabel#sectionTitleOrange {{
+        color: {ACCENT_ORANGE};
+        font-size: 12px;
+        font-weight: bold;
+        letter-spacing: 2px;
+        padding: 4px 0;
+    }}
     QLabel#panelTitle {{
         color: {NEON_TEXT};
         font-size: 18px;
@@ -958,7 +965,7 @@ class VideoCard(QFrame):
         lay.setSpacing(10)
 
         self.thumb = QLabel()
-        self.thumb.setFixedSize(96, 54)
+        self.thumb.setFixedSize(84, 48)
         self.thumb.setStyleSheet(f"border: 1px solid {ACCENT_CYAN_DIM}; border-radius: 4px; background: #000;")
         self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self.thumb)
@@ -969,7 +976,8 @@ class VideoCard(QFrame):
         lay.addWidget(title_lbl, 1)
 
         play = QPushButton("PLAY")
-        play.setFixedWidth(70)
+        play.setStyleSheet("padding: 4px 2px; font-size: 10px;")
+        play.setFixedWidth(46)
         play.setCursor(Qt.CursorShape.PointingHandCursor)
         play.clicked.connect(self.play)
         lay.addWidget(play)
@@ -984,7 +992,7 @@ class VideoCard(QFrame):
         pix = QPixmap()
         pix.loadFromData(data)
         if not pix.isNull():
-            self.thumb.setPixmap(pix.scaled(96, 54, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation))
+            self.thumb.setPixmap(pix.scaled(84, 48, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation))
 
     def play(self):
         webbrowser.open(f"https://www.youtube.com/watch?v={self.video_id}")
@@ -1470,7 +1478,7 @@ class ExtendedHUD(HudDataMixin, QWidget):
         layout.addWidget(divider)
         
         media_title = QLabel("MEDIA CAROUSEL")
-        media_title.setObjectName("sectionTitle")
+        media_title.setObjectName("sectionTitleOrange")
         layout.addWidget(media_title)
         
         self.ext_video_list = QListWidget()
