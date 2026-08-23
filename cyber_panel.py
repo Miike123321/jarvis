@@ -1234,17 +1234,19 @@ class ExtendedHUD(HudDataMixin, QWidget):
         event.accept()
 
 
-class CyberPanel(HudDataMixin, QWidget):
-    hud_task_prefix = ""
-
-    sheet_save_result = pyqtSignal(object, bool, str)
-
+class CyberPanel(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnBottomHint)
+        # Normal resizable window that fits the screen, with a minimum sensible size
+        self.setWindowTitle("JARVIS Panel")
         available_geometry = QApplication.primaryScreen().availableGeometry()
-        self.setGeometry(available_geometry)
+        self.resize(
+            min(available_geometry.width(), 1600),
+            min(available_geometry.height(), 980),
+        )
+        self.setMinimumSize(900, 560)
+        self.move(available_geometry.topLeft())
         
         self.setStyleSheet(
             """
@@ -1291,7 +1293,15 @@ class CyberPanel(HudDataMixin, QWidget):
             """
         )
 
-        layout = QHBoxLayout()
+        # Scrollable content container so the panel never clips on small screens
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        content = QWidget()
+        layout = QHBoxLayout(content)
         layout.setContentsMargins(18, 14, 18, 14)
         layout.setSpacing(14)
 
@@ -1410,9 +1420,17 @@ class CyberPanel(HudDataMixin, QWidget):
         self.timer.timeout.connect(self.update_hardware_metrics)
         self.timer.start(2000)
 
-        # Create Extended HUD on the right side
-        extended_hud_panel = self.create_extended_hud_panel()
-        layout.addWidget(extended_hud_panel, 1)
+        # Workers that fetch data for the separate ExtendedHUD window.
+        # CyberPanel itself no longer displays this data; the signals are
+        # forwarded to the ExtendedHUD instance in __main__.
+        self.financial_worker = FinancialDataWorker()
+        self.tasks_worker = TasksWorker()
+        self.youtube_worker = YouTubeWorker()
+        self.news_worker = NewsWorker()
+        self.financial_worker.start()
+        self.tasks_worker.start()
+        self.youtube_worker.start()
+        self.news_worker.start()
 
         # Конфигурация персистентного профиля для сохранения сессии авторизации
         self.profile = QWebEngineProfile("CyberProfile")
@@ -1484,15 +1502,17 @@ class CyberPanel(HudDataMixin, QWidget):
         self.open_superset_in_chrome(superset_urls[0])
 
         layout.addWidget(right_panel)
-        self.setLayout(layout)
+
+        scroll_area.setWidget(content)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll_area)
 
         self.calendar_worker = CalendarWorker()
         self.calendar_worker.events_ready.connect(self.events_view.setPlainText)
         self.calendar_worker.weather_ready.connect(self.weather_label.setText)
         self.calendar_worker.status_changed.connect(self.events_view.setPlainText)
         self.calendar_worker.start()
-
-        self.sheet_save_result.connect(self.on_sheet_save_result)
 
     def update_hardware_metrics(self):
         try:
@@ -1626,186 +1646,6 @@ class CyberPanel(HudDataMixin, QWidget):
         password = dialog.textValue()
         self.telegram_worker.set_password(password if accepted else "")
 
-    def create_extended_hud_panel(self):
-        """Create the Extended HUD panel with tasks, financial data, news, and media"""
-        panel = QWidget()
-        panel.setObjectName("extendedHudPanel")
-        panel.setStyleSheet(
-            "#extendedHudPanel { background-color: #0e191b; border: 1px solid #1f4f4e; border-radius: 12px; padding: 8px; }"
-        )
-        
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(10)
-        
-        # Title
-        hud_title = QLabel("EXTENDED HUD")
-        hud_title.setObjectName("sectionTitle")
-        hud_title.setStyleSheet("color: #73f6de; font-size: 12px; font-weight: bold;")
-        layout.addWidget(hud_title)
-        
-        # Task Management Section
-        task_title = QLabel("SPRINT ИМ")
-        task_title.setObjectName("sectionTitle")
-        layout.addWidget(task_title)
-        
-        self.sprint_list = QListWidget()
-        self.sprint_list.setMaximumHeight(120)
-        self.sprint_list.setStyleSheet(
-            "background-color: #0d1719; border: 1px solid #286e6b; color: #b8eee4; border-radius: 6px;"
-        )
-        layout.addWidget(self.sprint_list)
-        
-        backlog_title = QLabel("ЗАДАЧИ ДЛЯ ЮРЫ")
-        backlog_title.setObjectName("sectionTitle")
-        layout.addWidget(backlog_title)
-        
-        self.backlog_list = QListWidget()
-        self.backlog_list.setMaximumHeight(100)
-        self.backlog_list.setStyleSheet(
-            "background-color: #0d1719; border: 1px solid #286e6b; color: #b8eee4; border-radius: 6px;"
-        )
-        layout.addWidget(self.backlog_list)
-        
-        add_task_btn = QPushButton("+ ДОБАВИТЬ")
-        add_task_btn.setFixedHeight(28)
-        add_task_btn.clicked.connect(self.show_add_task_form)
-        layout.addWidget(add_task_btn)
-        
-        # Task Form
-        self.task_form = QWidget()
-        task_form_layout = QVBoxLayout(self.task_form)
-        task_form_layout.setContentsMargins(0, 0, 0, 0)
-        task_form_layout.setSpacing(4)
-        
-        self.task_name_input = QLineEdit()
-        self.task_name_input.setPlaceholderText("Название...")
-        self.task_name_input.setMaximumHeight(24)
-        self.task_name_input.setStyleSheet(
-            "background-color: #101f21; border: 1px solid #286e6b; color: #b8eee4; border-radius: 4px; padding: 4px;"
-        )
-        task_form_layout.addWidget(self.task_name_input)
-        
-        self.task_desc_input = QLineEdit()
-        self.task_desc_input.setPlaceholderText("Описание...")
-        self.task_desc_input.setMaximumHeight(24)
-        self.task_desc_input.setStyleSheet(
-            "background-color: #101f21; border: 1px solid #286e6b; color: #b8eee4; border-radius: 4px; padding: 4px;"
-        )
-        task_form_layout.addWidget(self.task_desc_input)
-        
-        form_buttons = QHBoxLayout()
-        form_buttons.setSpacing(4)
-        save_btn = QPushButton("СОХР")
-        save_btn.setFixedHeight(24)
-        save_btn.clicked.connect(self.save_task)
-        cancel_btn = QPushButton("ОТМЕН")
-        cancel_btn.setFixedHeight(24)
-        cancel_btn.clicked.connect(self.hide_add_task_form)
-        form_buttons.addWidget(save_btn)
-        form_buttons.addWidget(cancel_btn)
-        task_form_layout.addLayout(form_buttons)
-        
-        self.task_form.hide()
-        layout.addWidget(self.task_form)
-        
-        # Financial Section
-        divider1 = QLabel("─" * 35)
-        divider1.setStyleSheet("color: #286e6b; font-size: 10px;")
-        layout.addWidget(divider1)
-        
-        fin_title = QLabel("FINANCIAL")
-        fin_title.setObjectName("sectionTitle")
-        layout.addWidget(fin_title)
-        
-        fin_layout = QHBoxLayout()
-        fin_layout.setSpacing(4)
-        self.btc_indicator = RadialIndicator("BTC/USDT", 0, 0)
-        self.btc_indicator.setFixedSize(140, 140)
-        self.uah_indicator = RadialIndicator("USD/UAH", 0, 0)
-        self.uah_indicator.setFixedSize(140, 140)
-        fin_layout.addWidget(self.btc_indicator)
-        fin_layout.addWidget(self.uah_indicator)
-        fin_layout.addStretch()
-        layout.addLayout(fin_layout)
-        
-        # Media Section
-        divider2 = QLabel("─" * 35)
-        divider2.setStyleSheet("color: #286e6b; font-size: 10px;")
-        layout.addWidget(divider2)
-        
-        media_title = QLabel("MEDIA")
-        media_title.setObjectName("sectionTitle")
-        layout.addWidget(media_title)
-        
-        self.video_list = QListWidget()
-        self.video_list.setMaximumHeight(80)
-        self.video_list.setStyleSheet(
-            "background-color: #0d1719; border: 1px solid #286e6b; color: #b8eee4; border-radius: 6px;"
-        )
-        self.video_list.itemDoubleClicked.connect(self.play_video)
-        layout.addWidget(self.video_list)
-        
-        # News Section
-        divider3 = QLabel("─" * 35)
-        divider3.setStyleSheet("color: #286e6b; font-size: 10px;")
-        layout.addWidget(divider3)
-        
-        news_title = QLabel("NEWS HUB")
-        news_title.setObjectName("sectionTitle")
-        layout.addWidget(news_title)
-        
-        self.news_carousel = NewsCarousel()
-        self.news_carousel.setFixedHeight(32)
-        layout.addWidget(self.news_carousel)
-        
-        self.news_list = QListWidget()
-        self.news_list.setMaximumHeight(100)
-        self.news_list.setStyleSheet(
-            "background-color: #0d1719; border: 1px solid #286e6b; color: #b8eee4; border-radius: 6px;"
-        )
-        self.news_list.itemClicked.connect(self.open_news)
-        layout.addWidget(self.news_list)
-        
-        layout.addStretch()
-        
-        # Start workers for data updates
-        self.financial_worker = FinancialDataWorker()
-        self.financial_worker.data_updated.connect(self.update_financial_data)
-        # forward financial worker status to events view if available
-        if hasattr(self, 'events_view'):
-            try:
-                self.financial_worker.status_changed.connect(lambda s: self.events_view.setPlainText(s))
-            except Exception:
-                pass
-        self.financial_worker.start()
-        
-        self.tasks_worker = TasksWorker()
-        self.tasks_worker.tasks_updated.connect(self.update_tasks)
-        if hasattr(self, 'events_view'):
-            try:
-                self.tasks_worker.status_changed.connect(lambda s: self.events_view.setPlainText(s))
-            except Exception:
-                pass
-        self.tasks_worker.start()
-        
-        self.youtube_worker = YouTubeWorker()
-        self.youtube_worker.videos_updated.connect(self.update_videos)
-        try:
-            self.youtube_worker.status_changed.connect(lambda s: (self.video_list.clear(), self.video_list.addItem(f"ERROR: {s}")))
-        except Exception:
-            pass
-        self.youtube_worker.start()
-        
-        self.news_worker = NewsWorker()
-        self.news_worker.news_updated.connect(self.update_news)
-        try:
-            self.news_worker.status_changed.connect(lambda s: (self.news_list.clear(), self.news_list.addItem(f"ERROR: {s}")))
-        except Exception:
-            pass
-        self.news_worker.start()
-        
-        return panel
 
     def closeEvent(self, event):
         self.telegram_worker.stop()
@@ -1863,7 +1703,7 @@ if __name__ == '__main__':
     panel = CyberPanel()
     panel.show()
 
-    # Second-monitor HUD, fed by the same workers as the embedded panel
+    # Second-monitor HUD window, fed by CyberPanel's data workers
     extended_hud = ExtendedHUD()
     panel.financial_worker.data_updated.connect(extended_hud.update_financial_data)
     panel.tasks_worker.tasks_updated.connect(extended_hud.update_tasks)
