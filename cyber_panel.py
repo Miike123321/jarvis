@@ -921,38 +921,61 @@ class ClickableLabel(QLabel):
 
 
 class HudGauge(QWidget):
+    """CPU/RAM gauge in the same neon ring style as RadialIndicator."""
     def __init__(self, title, value, suffix="%", parent=None):
         super().__init__(parent)
         self.title = title
         self.value = value
         self.suffix = suffix
-        self.setMinimumSize(112, 112)
+        self.setMinimumSize(124, 124)
 
     def paintEvent(self, event):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         center = self.rect().center()
-        radius = min(self.width(), self.height()) / 2 - 10
+        outer = int(min(self.width(), self.height()) / 2 - 8)
+        inner = outer - 16
 
-        painter.setPen(QPen(QColor("#173f42"), 2))
-        painter.drawEllipse(center, int(radius), int(radius))
-        painter.setPen(QPen(QColor("#286e6b"), 5))
+        # Tick-mark outer ring
+        painter.setPen(QPen(QColor(ACCENT_CYAN_DIM), 2))
+        painter.drawEllipse(center, outer, outer)
+        for deg in range(0, 360, 15):
+            long_tick = deg % 45 == 0
+            r0 = outer - (7 if long_tick else 4)
+            a = math.radians(deg)
+            x0 = center.x() + r0 * math.cos(a)
+            y0 = center.y() + r0 * math.sin(a)
+            x1 = center.x() + outer * math.cos(a)
+            y1 = center.y() + outer * math.sin(a)
+            painter.setPen(QPen(QColor(ACCENT_CYAN) if long_tick else QColor(ACCENT_CYAN_DIM), 2 if long_tick else 1))
+            painter.drawLine(int(x0), int(y0), int(x1), int(y1))
+
+        # Dim track arc (0-100 scale, 285 deg sweep starting at 35 deg)
+        painter.setPen(QPen(QColor(ACCENT_CYAN_DIM), 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawArc(
-            int(center.x() - radius), int(center.y() - radius),
-            int(radius * 2), int(radius * 2), 35 * 16, 285 * 16
+            int(center.x() - inner), int(center.y() - inner),
+            inner * 2, inner * 2, 35 * 16, 285 * 16
         )
-        painter.setPen(QPen(QColor("#73f6de"), 5))
-        painter.drawArc(
-            int(center.x() - radius), int(center.y() - radius),
-            int(radius * 2), int(radius * 2), 35 * 16, int(-self.value * 2.85 * 16)
-        )
-        painter.setPen(QColor("#9effef"))
+
+        # Glowing value arc (orange when hot, cyan otherwise)
+        accent = QColor(ACCENT_ORANGE) if self.value >= 85 else QColor(ACCENT_CYAN)
+        span = int(min(max(self.value, 0), 100) * 2.85 * 16)
+        for width, alpha in ((9, 60), (6, 130), (3, 255)):
+            glow = QColor(accent)
+            glow.setAlpha(alpha)
+            painter.setPen(QPen(glow, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawArc(
+                int(center.x() - inner), int(center.y() - inner),
+                inner * 2, inner * 2, 35 * 16, -span
+            )
+
+        painter.setPen(QColor(NEON_MUTED))
         painter.setFont(QFont("Cascadia Mono", 9, QFont.Weight.Bold))
-        painter.drawText(self.rect().adjusted(8, 20, -8, -48), Qt.AlignmentFlag.AlignCenter, self.title)
+        painter.drawText(self.rect().adjusted(8, 22, -8, -52), Qt.AlignmentFlag.AlignCenter, self.title)
+        painter.setPen(QColor(NEON_TEXT))
         painter.setFont(QFont("Cascadia Mono", 16, QFont.Weight.Bold))
-        painter.drawText(self.rect().adjusted(8, 40, -8, -20), Qt.AlignmentFlag.AlignCenter, f"{self.value:g}{self.suffix}")
-
+        painter.drawText(self.rect().adjusted(8, 42, -8, -20), Qt.AlignmentFlag.AlignCenter, f"{self.value:g}{self.suffix}")
 
 class EmbeddedTerminal(QPlainTextEdit):
     def __init__(self, parent=None):
