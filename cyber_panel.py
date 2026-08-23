@@ -1362,14 +1362,18 @@ class ExtendedHUD(HudDataMixin, QWidget):
             screen_geometry = screens[1].geometry()
             self.setGeometry(screen_geometry)
         else:
-            # Fallback: centered window on the primary screen
-            primary_geometry = QApplication.primaryScreen().geometry()
+            # Fallback: centered window on the primary screen, clamped to fit
+            avail = QApplication.primaryScreen().availableGeometry()
+            w = min(1400, avail.width())
+            h = min(900, avail.height())
             self.setGeometry(
-                max(0, primary_geometry.center().x() - 700),
-                max(0, primary_geometry.center().y() - 450),
-                1400, 900,
+                avail.x() + max(0, (avail.width() - w) // 2),
+                avail.y() + max(0, (avail.height() - h) // 2),
+                w, h,
             )
-        
+
+        self.setMinimumSize(1000, 600)
+
         # Main layout
         main_layout = QHBoxLayout()
         main_layout.setContentsMargins(16, 16, 16, 16)
@@ -1579,7 +1583,8 @@ class CyberPanel(QWidget):
 
         # Левая панель метрик
         metrics_panel = QWidget()
-        metrics_panel.setFixedWidth(360)
+        metrics_panel.setMinimumWidth(300)
+        metrics_panel.setMaximumWidth(420)
         metrics_panel.setObjectName("metricsPanel")
         metrics_panel.setStyleSheet(
             panel_style("metricsPanel", pad=8)
@@ -1679,7 +1684,7 @@ class CyberPanel(QWidget):
         restart_button.clicked.connect(self.restart_app)
         metrics_layout.addWidget(restart_button)
 
-        layout.addWidget(metrics_panel)
+        layout.addWidget(metrics_panel, 0)
 
         self.telegram_worker = TelegramWorker()
         self.telegram_worker.messages_ready.connect(self.telegram_label.setText)
@@ -1728,7 +1733,8 @@ class CyberPanel(QWidget):
         layout.addWidget(self.browser, 1)
 
         right_panel = QWidget()
-        right_panel.setFixedWidth(520)
+        right_panel.setMinimumWidth(420)
+        right_panel.setMaximumWidth(560)
         right_panel.setObjectName("rightPanel")
         right_panel.setStyleSheet(
             panel_style("rightPanel", pad=8)
@@ -1778,7 +1784,7 @@ class CyberPanel(QWidget):
         )
         self.open_superset_in_chrome(superset_urls[0])
 
-        layout.addWidget(right_panel)
+        layout.addWidget(right_panel, 0)
 
         scroll_area.setWidget(content)
         outer = QVBoxLayout(self)
