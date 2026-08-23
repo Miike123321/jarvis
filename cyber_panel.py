@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QFileDialog,
+    QFrame,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
@@ -920,6 +921,67 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 
+class ThumbnailLoader(QThread):
+    """Fetch a video thumbnail off the UI thread."""
+    loaded = pyqtSignal(bytes)
+
+    def __init__(self, url, parent=None):
+        super().__init__(parent)
+        self.url = url
+
+    def run(self):
+        try:
+            with urllib.request.urlopen(self.url, timeout=8) as resp:
+                self.loaded.emit(resp.read())
+        except Exception:
+            pass
+
+
+class VideoCard(QFrame):
+    """Thumbnail + title + neon PLAY button, mockup style."""
+    def __init__(self, title, video_id, thumbnail_url, parent=None):
+        super().__init__(parent)
+        self.video_id = video_id
+        self.setStyleSheet(
+            f"QFrame {{ background-color: {PANEL_FILL}; border: 1px solid {ACCENT_CYAN_DIM}; border-radius: 10px; }}"
+        )
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(10)
+
+        self.thumb = QLabel()
+        self.thumb.setFixedSize(96, 54)
+        self.thumb.setStyleSheet(f"border: 1px solid {ACCENT_CYAN_DIM}; border-radius: 4px; background: #000;")
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.thumb)
+
+        title_lbl = QLabel(title)
+        title_lbl.setWordWrap(True)
+        title_lbl.setStyleSheet(f"color: {NEON_TEXT}; border: none; font-size: 12px;")
+        lay.addWidget(title_lbl, 1)
+
+        play = QPushButton("PLAY")
+        play.setFixedWidth(70)
+        play.setCursor(Qt.CursorShape.PointingHandCursor)
+        play.clicked.connect(self.play)
+        lay.addWidget(play)
+
+        if thumbnail_url:
+            loader = ThumbnailLoader(thumbnail_url, self)
+            loader.loaded.connect(self._set_thumb)
+            loader.start()
+            self._loader = loader
+
+    def _set_thumb(self, data):
+        pix = QPixmap()
+        pix.loadFromData(data)
+        if not pix.isNull():
+            self.thumb.setPixmap(pix.scaled(96, 54, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation))
+
+    def play(self):
+        webbrowser.open(f"https://www.youtube.com/watch?v={self.video_id}")
+
+
 class HudGauge(QWidget):
     """CPU/RAM gauge in the same neon ring style as RadialIndicator."""
     def __init__(self, title, value, suffix="%", parent=None):
@@ -1080,9 +1142,12 @@ class HudDataMixin:
             video_list.addItem("NO VIDEOS — check YOUTUBE_API_KEY or network")
             return
         for title, video_id, thumbnail in videos:
-            item = QListWidgetItem(title[:self.hud_title_max_len])
+            card = VideoCard(title[:self.hud_title_max_len], video_id, thumbnail)
+            item = QListWidgetItem()
+            item.setSizeHint(card.sizeHint())
             item.setData(Qt.ItemDataRole.UserRole, video_id)
             video_list.addItem(item)
+            video_list.setItemWidget(item, card)
 
     def play_video(self, item):
         video_id = item.data(Qt.ItemDataRole.UserRole)
@@ -1275,7 +1340,8 @@ class ExtendedHUD(HudDataMixin, QWidget):
         layout.addWidget(media_title)
         
         self.ext_video_list = QListWidget()
-        self.ext_video_list.setMaximumHeight(150)
+        self.ext_video_list.setMinimumHeight(220)
+        self.ext_video_list.setMaximumHeight(320)
         self.ext_video_list.itemDoubleClicked.connect(self.play_video)
         layout.addWidget(self.ext_video_list)
 
