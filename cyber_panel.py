@@ -1737,6 +1737,11 @@ class CyberPanel(QWidget):
         right_layout.setContentsMargins(14, 12, 14, 12)
         right_layout.setSpacing(10)
 
+        sphere = NeonSphereWidget()
+        sphere.setMinimumHeight(220)
+        sphere.setMaximumHeight(260)
+        right_layout.addWidget(sphere)
+
         self.clock_label = QLabel()
         self.clock_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.clock_label.setStyleSheet(
