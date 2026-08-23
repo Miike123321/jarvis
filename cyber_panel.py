@@ -38,14 +38,22 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
-from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-from PyQt6.QtGui import QSurfaceFormat
-from OpenGL.GL import (
-    glClear, glClearColor, glColor4f, glPointSize, glBegin, glEnd, glVertex3f,
-    glMatrixMode, glLoadIdentity, glRotatef, glTranslatef, glEnable, glBlendFunc,
-    GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_PROJECTION, GL_MODELVIEW,
-    GL_POINTS, GL_BLEND, GL_SRC_ALPHA, GL_ONE, glLoadMatrixf,
-)
+# OpenGL is optional: if PyOpenGL is missing or the driver/context is
+# unavailable, the sphere falls back to a pure-QPainter software render.
+try:
+    from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+    from PyQt6.QtGui import QSurfaceFormat
+    from OpenGL.GL import (
+        glClear, glClearColor, glColor4f, glPointSize, glBegin, glEnd, glVertex3f,
+        glMatrixMode, glLoadIdentity, glRotatef, glTranslatef, glEnable, glBlendFunc,
+        GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_PROJECTION, GL_MODELVIEW,
+        GL_POINTS, GL_BLEND, GL_SRC_ALPHA, GL_ONE, glLoadMatrixf,
+    )
+    _GL_AVAILABLE = True
+except Exception:
+    QOpenGLWidget = None
+    QSurfaceFormat = None
+    _GL_AVAILABLE = False
 from PyQt6.QtGui import QIcon, QPixmap, QColor, QPainter, QPen, QFont, QPolygon
 from PyQt6.QtCore import Qt, QUrl, QTimer, QThread, QProcess, QProcessEnvironment, QSize, pyqtSignal, QPoint, QRect
 from telethon import TelegramClient
@@ -1049,13 +1057,10 @@ class HudRingCenterpiece(QWidget):
         painter.drawEllipse(center, 5, 5)
 
 
-class NeonSphereWidget(QOpenGLWidget):
-    """Rotating neon particle globe (mockup centerpiece)."""
+class _SphereBase(QWidget):
+    """Shared particle-globe logic: Fibonacci point cloud + rotation timer."""
 
     def __init__(self, parent=None, points=420):
-        fmt = QSurfaceFormat()
-        fmt.setSamples(4)
-        QSurfaceFormat.setDefaultFormat(fmt)
         super().__init__(parent)
         self.angle = 0.0
         self.setMinimumSize(220, 220)
@@ -1075,53 +1080,119 @@ class NeonSphereWidget(QOpenGLWidget):
         self.angle = (self.angle + 0.6) % 360.0
         self.update()
 
-    def initializeGL(self):
-        glClearColor(0.039, 0.051, 0.063, 1.0)  # match NEON_BACKGROUND
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-
-    def resizeGL(self, w, h):
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        aspect = (w / h) if h else 1.0
-        f = 1.0 / math.tan(math.radians(45.0) / 2.0)
-        near, far = 0.1, 100.0
-        m = [0.0] * 16
-        m[0] = f / aspect
-        m[5] = f
-        m[10] = (far + near) / (near - far)
-        m[11] = -1.0
-        m[14] = (2.0 * far * near) / (near - far)
-        glLoadMatrixf(m)
-        glMatrixMode(GL_MODELVIEW)
-
-    def paintGL(self):
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        glLoadIdentity()
-        glTranslatef(0.0, 0.0, -2.6)
-        glRotatef(self.angle, 0.0, 1.0, 0.0)
-        glRotatef(18.0, 1.0, 0.0, 0.0)
-
-        cyan = self._rgba(ACCENT_CYAN)
-        orange = self._rgba(ACCENT_ORANGE)
-        n = len(self._pts)
-        # two passes: soft glow then bright core
-        for size, alpha in ((7.0, 0.18), (3.0, 0.9)):
-            glPointSize(size)
-            glBegin(GL_POINTS)
-            for i, (x, y, z) in enumerate(self._pts):
-                base = cyan if (i % 11) else orange
-                # fade points on the far side for depth
-                depth = (z + 1.0) * 0.5
-                a = alpha * (0.25 + 0.75 * depth)
-                glColor4f(base[0], base[1], base[2], a)
-                glVertex3f(x, y, z)
-            glEnd()
-
     @staticmethod
     def _rgba(hex_color):
         h = hex_color.lstrip('#')
         return tuple(int(h[i:i+2], 16) / 255.0 for i in (0, 2, 4))
+
+
+class SoftwareSphereWidget(_SphereBase):
+    """Pure-QPainter particle globe. No OpenGL dependency; always works."""
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor(NEON_BACKGROUND))
+
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        R = min(self.width(), self.height()) * 0.42
+        ay = math.radians(self.angle)
+        tilt = math.radians(18.0)
+        cos_ay, sin_ay = math.cos(ay), math.sin(ay)
+        cos_t, sin_t = math.cos(tilt), math.sin(tilt)
+
+        cyan = QColor(ACCENT_CYAN)
+        orange = QColor(ACCENT_ORANGE)
+        projected = []
+        for i, (x, y, z) in enumerate(self._pts):
+            # rotate about Y then tilt about X
+            x1 = x * cos_ay + z * sin_ay
+            z1 = -x * sin_ay + z * cos_ay
+            y1 = y * cos_t - z1 * sin_t
+            z2 = y * sin_t + z1 * cos_t
+            projected.append((cx + x1 * R, cy - y1 * R, z2, i))
+
+        # draw far points first so near points overlay them
+        projected.sort(key=lambda p: p[2])
+        for sx, sy, z, i in projected:
+            depth = (z + 1.0) * 0.5  # 0 far .. 1 near
+            base = cyan if (i % 11) else orange
+            # soft glow pass then bright core
+            for size, alpha in ((7.0, 0.16), (3.0, 0.9)):
+                a = int(255 * alpha * (0.25 + 0.75 * depth))
+                c = QColor(base)
+                c.setAlpha(a)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(c)
+                r = size * (0.6 + 0.4 * depth) / 2.0
+                painter.drawEllipse(int(sx - r), int(sy - r), int(r * 2), int(r * 2))
+        painter.end()
+
+
+if _GL_AVAILABLE:
+    class GLSphereWidget(QOpenGLWidget, _SphereBase):
+        """Hardware-accelerated particle globe (preferred when GL is present)."""
+
+        def __init__(self, parent=None, points=420):
+            fmt = QSurfaceFormat()
+            fmt.setSamples(4)
+            QSurfaceFormat.setDefaultFormat(fmt)
+            QOpenGLWidget.__init__(self, parent)
+            _SphereBase.__init__(self, parent, points)
+
+        def initializeGL(self):
+            glClearColor(0.039, 0.051, 0.063, 1.0)  # match NEON_BACKGROUND
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE)
+
+        def resizeGL(self, w, h):
+            glMatrixMode(GL_PROJECTION)
+            glLoadIdentity()
+            aspect = (w / h) if h else 1.0
+            f = 1.0 / math.tan(math.radians(45.0) / 2.0)
+            near, far = 0.1, 100.0
+            m = [0.0] * 16
+            m[0] = f / aspect
+            m[5] = f
+            m[10] = (far + near) / (near - far)
+            m[11] = -1.0
+            m[14] = (2.0 * far * near) / (near - far)
+            glLoadMatrixf(m)
+            glMatrixMode(GL_MODELVIEW)
+
+        def paintGL(self):
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+            glLoadIdentity()
+            glTranslatef(0.0, 0.0, -2.6)
+            glRotatef(self.angle, 0.0, 1.0, 0.0)
+            glRotatef(18.0, 1.0, 0.0, 0.0)
+
+            cyan = self._rgba(ACCENT_CYAN)
+            orange = self._rgba(ACCENT_ORANGE)
+            # two passes: soft glow then bright core
+            for size, alpha in ((7.0, 0.18), (3.0, 0.9)):
+                glPointSize(size)
+                glBegin(GL_POINTS)
+                for i, (x, y, z) in enumerate(self._pts):
+                    base = cyan if (i % 11) else orange
+                    # fade points on the far side for depth
+                    depth = (z + 1.0) * 0.5
+                    a = alpha * (0.25 + 0.75 * depth)
+                    glColor4f(base[0], base[1], base[2], a)
+                    glVertex3f(x, y, z)
+                glEnd()
+else:
+    GLSphereWidget = None
+
+
+def NeonSphereWidget(parent=None, points=420):
+    """Return the best available sphere: GL when possible, else software."""
+    if _GL_AVAILABLE and GLSphereWidget is not None:
+        try:
+            return GLSphereWidget(parent, points)
+        except Exception:
+            pass
+    return SoftwareSphereWidget(parent, points)
 
 
 class HudGauge(QWidget):
