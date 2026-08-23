@@ -982,6 +982,57 @@ class VideoCard(QFrame):
         webbrowser.open(f"https://www.youtube.com/watch?v={self.video_id}")
 
 
+class HudRingCenterpiece(QWidget):
+    """Decorative concentric neon HUD ring (mockup centerpiece, static + slow rotation)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.angle = 0
+        self.setMinimumSize(200, 200)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(60)
+
+    def _tick(self):
+        self.angle = (self.angle + 1) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        center = self.rect().center()
+        max_r = int(min(self.width(), self.height()) / 2 - 6)
+
+        # Faint concentric guide rings
+        for frac, alpha in ((1.0, 40), (0.8, 30), (0.6, 22)):
+            c = QColor(ACCENT_CYAN_DIM)
+            c.setAlpha(alpha)
+            painter.setPen(QPen(c, 1))
+            painter.drawEllipse(center, int(max_r * frac), int(max_r * frac))
+
+        # Glowing segmented arcs rotating at different speeds
+        arcs = [
+            (max_r, ACCENT_CYAN, self.angle, 70, 5),
+            (int(max_r * 0.8), ACCENT_ORANGE, -self.angle * 2, 50, 4),
+            (int(max_r * 0.6), ACCENT_CYAN, self.angle * 3, 100, 3),
+        ]
+        for radius, color, start, span, width in arcs:
+            for w, alpha in ((width + 4, 50), (width, 220)):
+                glow = QColor(color)
+                glow.setAlpha(alpha)
+                painter.setPen(QPen(glow, w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                painter.drawArc(
+                    int(center.x() - radius), int(center.y() - radius),
+                    radius * 2, radius * 2, int(start * 16), int(span * 16)
+                )
+
+        # Bright core dot
+        core = QColor(ACCENT_CYAN)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(core)
+        painter.drawEllipse(center, 5, 5)
+
+
 class HudGauge(QWidget):
     """CPU/RAM gauge in the same neon ring style as RadialIndicator."""
     def __init__(self, title, value, suffix="%", parent=None):
@@ -1357,6 +1408,10 @@ class ExtendedHUD(HudDataMixin, QWidget):
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
         
+        ring = HudRingCenterpiece()
+        ring.setMaximumHeight(240)
+        layout.addWidget(ring, 0, Qt.AlignmentFlag.AlignHCenter)
+
         self.ext_news_carousel = NewsCarousel()
         layout.addWidget(self.ext_news_carousel)
         
