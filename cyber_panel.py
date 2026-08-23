@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
 import re
+import math
 from urllib.parse import urlparse
 
 load_dotenv(os.path.expanduser("~/.env"))
@@ -802,53 +803,68 @@ class TelegramWorker(QThread):
 
 
 class RadialIndicator(QWidget):
-    """Radial financial indicator for BTC/USDT or USD/UAH"""
+    """Radial financial indicator for BTC/USDT or USD/UAH (mockup neon ring style)"""
     def __init__(self, label, value, change=0, parent=None):
         super().__init__(parent)
         self.label = label
         self.value = value
         self.change = change
-        self.setMinimumSize(180, 180)
+        self.setMinimumSize(190, 190)
 
     def paintEvent(self, event):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
+
         center = self.rect().center()
-        radius = 80
-        
-        # Outer circle
-        painter.setPen(QPen(QColor("#173f42"), 2))
-        painter.drawEllipse(center, radius, radius)
-        
-        # Inner arc (based on change %)
+        accent = QColor(ACCENT_CYAN) if self.change >= 0 else QColor(ACCENT_ORANGE)
+        outer = int(min(self.width(), self.height()) / 2 - 8)
+        inner = outer - 22
+
+        # Tick-mark outer ring
+        painter.setPen(QPen(QColor(ACCENT_CYAN_DIM), 2))
+        painter.drawEllipse(center, outer, outer)
+        for deg in range(0, 360, 6):
+            long_tick = deg % 30 == 0
+            r0 = outer - (8 if long_tick else 4)
+            a = math.radians(deg)
+            x0 = center.x() + r0 * math.cos(a)
+            y0 = center.y() + r0 * math.sin(a)
+            x1 = center.x() + outer * math.cos(a)
+            y1 = center.y() + outer * math.sin(a)
+            painter.setPen(QPen(accent if long_tick else QColor(ACCENT_CYAN_DIM), 2 if long_tick else 1))
+            painter.drawLine(int(x0), int(y0), int(x1), int(y1))
+
+        # Glowing progress arc (change %)
         change_normalized = min(max((self.change + 100) / 200 * 100, 0), 100)
-        painter.setPen(QPen(QColor("#73f6de" if self.change >= 0 else "#ff4444"), 4))
-        painter.drawArc(
-            int(center.x() - radius), int(center.y() - radius),
-            radius * 2, radius * 2, 0, int(change_normalized * 3.6 * 16)
-        )
-        
+        span = int(change_normalized * 3.6 * 16)
+        for width, alpha in ((9, 60), (6, 130), (3, 255)):
+            glow = QColor(accent)
+            glow.setAlpha(alpha)
+            painter.setPen(QPen(glow, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawArc(
+                int(center.x() - inner), int(center.y() - inner),
+                inner * 2, inner * 2, 90 * 16, -span
+            )
+
         # Label
-        painter.setPen(QColor("#9effef"))
+        painter.setPen(QColor(NEON_MUTED))
         painter.setFont(QFont("Cascadia Mono", 10, QFont.Weight.Bold))
-        painter.drawText(self.rect().adjusted(0, 40, 0, 0), Qt.AlignmentFlag.AlignHCenter, self.label)
-        
-        # Value
-        painter.setFont(QFont("Cascadia Mono", 14, QFont.Weight.Bold))
-        painter.drawText(self.rect().adjusted(0, 75, 0, 0), Qt.AlignmentFlag.AlignHCenter, f"{self.value:g}")
-        
+        painter.drawText(self.rect().adjusted(0, 46, 0, 0), Qt.AlignmentFlag.AlignHCenter, self.label)
+
+        # Value (bright)
+        painter.setPen(QColor(NEON_TEXT))
+        painter.setFont(QFont("Cascadia Mono", 16, QFont.Weight.Bold))
+        painter.drawText(self.rect().adjusted(0, 78, 0, 0), Qt.AlignmentFlag.AlignHCenter, f"{self.value:g}")
+
         # Change percentage
-        change_color = QColor("#73f6de") if self.change >= 0 else QColor("#ff4444")
-        painter.setPen(change_color)
+        painter.setPen(accent)
         painter.setFont(QFont("Cascadia Mono", 9))
         painter.drawText(
             self.rect().adjusted(0, 120, 0, 0),
             Qt.AlignmentFlag.AlignHCenter,
             f"{self.change:+.2f}%"
         )
-
 
 class NewsCarousel(QWidget):
     """News ticker with scrolling text"""
