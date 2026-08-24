@@ -52,9 +52,54 @@ from googleapiclient.discovery import build
 # Блокировка аппаратного ускорения для подавления ошибок MESA/libEGL в среде WSL
 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --no-sandbox"
 
+# Unified Google OAuth: ONE credentials.json (Desktop app) + ONE token for ALL
+# Google APIs the app uses (Sheets read/write + Calendar read). YouTube uses an
+# API key, not OAuth, so it is intentionally excluded.
 GOOGLE_CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
-# Read-write scope so tasks added in the UI can be appended to the backlog sheet
 GOOGLE_SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+# Single combined scope set + single shared token file.
+GOOGLE_UNIFIED_SCOPES = sorted(set(GOOGLE_CALENDAR_SCOPES + GOOGLE_SHEETS_SCOPES))
+GOOGLE_UNIFIED_TOKEN = os.path.expanduser("~/.google_unified_token.json")
+
+
+def get_google_credentials(status_emit=None):
+    """Return valid unified Google credentials (Sheets+Calendar), running a single
+    OAuth flow if needed. Both the Sheets and Calendar workers use this so there is
+    only one token and one consent screen. status_emit: optional callable(str).
+    """
+    def say(msg):
+        if status_emit:
+            status_emit(msg)
+
+    credentials_path = os.path.expanduser("~/google_credentials.json")
+    token_path = GOOGLE_UNIFIED_TOKEN
+
+    credentials = None
+    if os.path.exists(token_path):
+        try:
+            credentials = Credentials.from_authorized_user_file(token_path, GOOGLE_UNIFIED_SCOPES)
+        except Exception:
+            credentials = None
+
+    if credentials and credentials.expired and credentials.refresh_token:
+        try:
+            credentials.refresh(Request())
+        except Exception:
+            credentials = None
+
+    if not credentials or not credentials.valid:
+        if not os.path.exists(credentials_path):
+            say("GOOGLE: CREDENTIALS NOT FOUND")
+            return None
+        flow = InstalledAppFlow.from_client_secrets_file(credentials_path, GOOGLE_UNIFIED_SCOPES)
+        credentials = run_google_oauth(flow)
+
+    try:
+        with open(token_path, "w", encoding="utf-8") as token_file:
+            token_file.write(credentials.to_json())
+    except Exception:
+        pass
+    return credentials
 
 
 def is_wsl() -> bool:
@@ -425,37 +470,17 @@ class TasksWorker(QThread):
     def run(self):
         while self.running:
             try:
-                # Try to fetch from Google Sheets
-                credentials_path = os.path.expanduser("~/google_credentials.json")
-                token_path = os.path.expanduser("~/.google_sheets_token.json")
-                
-                credentials = None
-                if os.path.exists(token_path):
-                    credentials = Credentials.from_authorized_user_file(
-                        token_path, GOOGLE_SHEETS_SCOPES
-                    )
-                
-                if credentials and credentials.expired and credentials.refresh_token:
-                    credentials.refresh(Request())
-                
-                if not credentials or not credentials.valid:
-                    if not os.path.exists(credentials_path):
-                        self.status_changed.emit("TASKS: NO CREDENTIALS")
-                        self.tasks_updated.emit([], [])
-                        for _ in range(60):
-                            if not self.running:
-                                return
-                            threading.Event().wait(1)
-                        continue
-                    
-                    flow = InstalledAppFlow.from_client_secrets_file(
-                        credentials_path, GOOGLE_SHEETS_SCOPES
-                    )
-                    credentials = run_google_oauth(flow)
-                
-                with open(token_path, "w", encoding="utf-8") as token_file:
-                    token_file.write(credentials.to_json())
-                
+                # One shared token for all Google APIs (Sheets+Calendar)
+                credentials = get_google_credentials(self.status_changed.emit)
+                if not credentials:
+                    self.status_changed.emit("TASKS: NO CREDENTIALS")
+                    self.tasks_updated.emit([], [])
+                    for _ in range(60):
+                        if not self.running:
+                            return
+                        threading.Event().wait(1)
+                    continue
+
                 service = build("sheets", "v4", credentials=credentials)
                 
                 # Get sheet IDs from environment
@@ -657,27 +682,13 @@ class CalendarWorker(QThread):
         self.running = False
 
     def run(self):
-        credentials_path = os.path.expanduser("~/google_credentials.json")
-        token_path = os.path.expanduser("~/.google_calendar_token.json")
         try:
-            credentials = None
-            if os.path.exists(token_path):
-                credentials = Credentials.from_authorized_user_file(
-                    token_path, GOOGLE_CALENDAR_SCOPES
-                )
-            if credentials and credentials.expired and credentials.refresh_token:
-                credentials.refresh(Request())
-            if not credentials or not credentials.valid:
-                if not os.path.exists(credentials_path):
-                    self.status_changed.emit("CALENDAR: CREDENTIALS NOT FOUND")
-                    self.update_weather()
-                    return
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    credentials_path, GOOGLE_CALENDAR_SCOPES
-                )
-                credentials = run_google_oauth(flow)
-            with open(token_path, "w", encoding="utf-8") as token_file:
-                token_file.write(credentials.to_json())
+            # One shared token for all Google APIs (Sheets+Calendar)
+            credentials = get_google_credentials(self.status_changed.emit)
+            if not credentials:
+                self.status_changed.emit("CALENDAR: CREDENTIALS NOT FOUND")
+                self.update_weather()
+                return
 
             service = build("calendar", "v3", credentials=credentials)
             while self.running:
