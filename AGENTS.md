@@ -13,15 +13,15 @@ Work happens on branch `feature/first-run-setup-and-missing-pieces` (PR #1).
 - `panel_style(object_name=None, pad=10)` — helper for rounded neon-edged panels.
 - Custom-painted widgets: `RadialIndicator` (BTC/UAH gauges), `HudGauge` (CPU/RAM),
   `NewsCarousel` (ticker), `VideoCard` (thumbnail+PLAY), sphere globe.
-- The globe is `NeonSphereWidget(...)` — a FACTORY, not a class. It returns
-  `GLSphereWidget` (QOpenGLWidget) when PyOpenGL/GL is available, else
-  `SoftwareSphereWidget` (pure QPainter). OpenGL is OPTIONAL: imports are wrapped
-  in try/except (`_GL_AVAILABLE`), so the app starts with no PyOpenGL installed.
-  Shared point-cloud/timer logic lives in `_SphereBase`.
+- The globe is `NeonSphereWidget(...)` — a FACTORY returning `SoftwareSphereWidget`
+  (pure QPainter). We do NOT use QOpenGLWidget: QtWebEngine composites the top-level
+  window with D3D11 on Windows, which is incompatible with QOpenGLWidget and spams
+  "'D3D11' is not compatible with QOpenGLWidget". Software globe looks identical.
+  PyOpenGL is NOT a dependency. Shared point-cloud/timer logic lives in `_SphereBase`.
 
 ## Building / running on the user's machine
 - Windows: `build_exe.bat` (PyInstaller) — user builds the .exe themselves.
-- Python deps in `requirements.txt` (includes `PyOpenGL` for the globe).
+- Python deps in `requirements.txt` (no PyOpenGL — globe is software-rendered).
 
 ## Verifying renders in THIS environment (hard-won)
 - **The sandbox resets between sessions** — PyQt6, xvfb, and the X/GL system libs
