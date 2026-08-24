@@ -781,10 +781,9 @@ class TelegramWorker(QThread):
 
                 messages.sort(key=lambda item: item[0], reverse=True)
                 if messages:
-                    # Show only up to the first line break or 26 characters of
-                    # each of the last 5 messages, so the Telegram block stays
-                    # compact and the panel keeps a stable size.
-                    output = "\n".join(
+                    # One-line ticker: up to the first line break or 26 chars of
+                    # each of the last 5 messages, joined with a separator.
+                    output = "  •  ".join(
                         f"{name}: {text.splitlines()[0][:26] if text.strip() else ''}"
                         for _, name, text in messages[:5]
                     )
@@ -931,6 +930,58 @@ class ClickableLabel(QLabel):
     def mousePressEvent(self, event):
         self.clicked.emit()
         super().mousePressEvent(event)
+
+
+class TelegramTicker(QWidget):
+    """One-line horizontally scrolling Telegram ticker (compact, clickable)."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.text = "TELEGRAM: STARTING..."
+        self.scroll_pos = 0
+        self.setFixedHeight(34)
+        self.setMinimumWidth(250)
+        self.setMaximumWidth(450)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(
+            "background-color: #101f21; border: 1px solid #286e6b; border-radius: 8px;"
+        )
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(50)
+
+    def setText(self, text):
+        self.text = text
+        self.scroll_pos = self.width()
+        self.update()
+
+    def _tick(self):
+        self.scroll_pos -= 2
+        if self.scroll_pos < -self._text_width():
+            self.scroll_pos = self.width()
+        self.update()
+
+    def _text_width(self):
+        return self.fontMetrics().horizontalAdvance(self.text) + 40
+
+    def mousePressEvent(self, event):
+        self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setClipRect(self.rect().adjusted(8, 0, -8, 0))
+        painter.setPen(QColor("#bffef1"))
+        painter.setFont(QFont("Cascadia Mono", 11))
+        painter.drawText(
+            int(self.scroll_pos), 0, self._text_width() + self.width(), self.height(),
+            Qt.AlignmentFlag.AlignVCenter, self.text,
+        )
+        painter.end()
 
 
 class ThumbnailLoader(QThread):
@@ -1625,18 +1676,11 @@ class CyberPanel(QWidget):
         self.temp_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         metrics_layout.addWidget(self.temp_label)
 
-        self.telegram_label = ClickableLabel("TELEGRAM: STARTING...")
-        self.telegram_label.setMinimumWidth(250)
-        self.telegram_label.setMaximumWidth(450)
-        self.telegram_label.setWordWrap(True)
-        self.telegram_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.telegram_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.telegram_label.setStyleSheet(
-            "color: #bffef1; background-color: #101f21; "
-            "border: 1px solid #286e6b; border-radius: 8px; padding: 12px; font-size: 12px;"
-        )
+        self.telegram_label = TelegramTicker()
         self.telegram_label.clicked.connect(self.open_telegram)
         metrics_layout.addWidget(self.telegram_label)
+        # 6px breathing room below the Telegram ticker
+        metrics_layout.addSpacing(6)
 
         shortcuts_layout = QHBoxLayout()
         shortcuts_layout.setSpacing(8)
