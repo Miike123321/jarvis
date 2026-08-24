@@ -1,6 +1,7 @@
 import sys
 import os
 import asyncio
+import shutil
 import threading
 import json
 import subprocess
@@ -12,6 +13,7 @@ from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
 import re
+import math
 from urllib.parse import urlparse
 
 load_dotenv(os.path.expanduser("~/.env"))
@@ -24,18 +26,23 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPushButton,
     QPlainTextEdit,
+    QTextEdit,
     QLineEdit,
+    QProgressBar,
     QInputDialog,
     QDialog,
     QStyle,
     QScrollArea,
     QListWidget,
     QListWidgetItem,
+    QFileDialog,
+    QFrame,
+    QSizePolicy,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
 from PyQt6.QtGui import QIcon, QPixmap, QColor, QPainter, QPen, QFont, QPolygon
-from PyQt6.QtCore import Qt, QUrl, QTimer, QThread, QProcess, QProcessEnvironment, QSize, pyqtSignal, QPoint, QRect
+from PyQt6.QtCore import Qt, QUrl, QTimer, QThread, QProcess, QProcessEnvironment, QSize, pyqtSignal, QPoint, QRect, QEvent
 from telethon import TelegramClient
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -45,8 +52,54 @@ from googleapiclient.discovery import build
 # Блокировка аппаратного ускорения для подавления ошибок MESA/libEGL в среде WSL
 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --no-sandbox"
 
+# Unified Google OAuth: ONE credentials.json (Desktop app) + ONE token for ALL
+# Google APIs the app uses (Sheets read/write + Calendar read). YouTube uses an
+# API key, not OAuth, so it is intentionally excluded.
 GOOGLE_CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
-GOOGLE_SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+GOOGLE_SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+# Single combined scope set + single shared token file.
+GOOGLE_UNIFIED_SCOPES = sorted(set(GOOGLE_CALENDAR_SCOPES + GOOGLE_SHEETS_SCOPES))
+GOOGLE_UNIFIED_TOKEN = os.path.expanduser("~/.google_unified_token.json")
+
+
+def get_google_credentials(status_emit=None):
+    """Return valid unified Google credentials (Sheets+Calendar), running a single
+    OAuth flow if needed. Both the Sheets and Calendar workers use this so there is
+    only one token and one consent screen. status_emit: optional callable(str).
+    """
+    def say(msg):
+        if status_emit:
+            status_emit(msg)
+
+    credentials_path = os.path.expanduser("~/google_credentials.json")
+    token_path = GOOGLE_UNIFIED_TOKEN
+
+    credentials = None
+    if os.path.exists(token_path):
+        try:
+            credentials = Credentials.from_authorized_user_file(token_path, GOOGLE_UNIFIED_SCOPES)
+        except Exception:
+            credentials = None
+
+    if credentials and credentials.expired and credentials.refresh_token:
+        try:
+            credentials.refresh(Request())
+        except Exception:
+            credentials = None
+
+    if not credentials or not credentials.valid:
+        if not os.path.exists(credentials_path):
+            say("GOOGLE: CREDENTIALS NOT FOUND")
+            return None
+        flow = InstalledAppFlow.from_client_secrets_file(credentials_path, GOOGLE_UNIFIED_SCOPES)
+        credentials = run_google_oauth(flow)
+
+    try:
+        with open(token_path, "w", encoding="utf-8") as token_file:
+            token_file.write(credentials.to_json())
+    except Exception:
+        pass
+    return credentials
 
 
 def is_wsl() -> bool:
@@ -72,6 +125,287 @@ def run_google_oauth(flow):
         finally:
             webbrowser.open = original_open
     return flow.run_local_server(port=0, open_browser=True)
+
+
+ENV_PATH = os.path.expanduser("~/.env")
+GOOGLE_CREDENTIALS_PATH = os.path.expanduser("~/google_credentials.json")
+
+SETUP_FIELDS = [
+    ("TELEGRAM_API_ID", "Telegram API ID", False),
+    ("TELEGRAM_API_HASH", "Telegram API Hash", False),
+    ("TELEGRAM_PHONE", "Telegram Phone (+380...)", False),
+    ("YOUTUBE_API_KEY", "YouTube Data API Key", False),
+    ("SPRINT_SHEET_ID", "Google Sheet ID — Sprint", False),
+    ("BACKLOG_SHEET_ID", "Google Sheet ID — Backlog", False),
+    ("TELEGRAM_EXE_PATH", "Telegram.exe path", True),
+    ("CHROME_EXE_PATH", "chrome.exe path", True),
+    ("RDP_FILE_PATH", "RDP file path", True),
+    ("SLACK_BOT_TOKEN", "Slack Bot Token (xoxb-...)", True),
+    ("SLACK_CHANNEL_ID", "Slack Channel ID (C...)", True),
+]
+
+REQUIRED_ENV_KEYS = [key for key, _, optional in SETUP_FIELDS if not optional]
+# ===== Step 1 redesign: shared neon theme (cyan/orange, glow-edged panels) =====
+NEON_BACKGROUND = "#0a0d10"
+NEON_TEXT = "#d9fff8"
+NEON_MUTED = "#8fd8cc"
+ACCENT_CYAN = "#3ef2e6"
+ACCENT_CYAN_DIM = "#1c8f87"
+ACCENT_ORANGE = "#ff9a3c"
+PANEL_FILL = "#0e1517"
+
+HUD_THEME_STYLESHEET = f"""
+    QWidget {{
+        color: {NEON_TEXT};
+        background-color: {NEON_BACKGROUND};
+        font-family: 'Cascadia Mono', 'DejaVu Sans Mono', monospace;
+    }}
+    QLabel#sectionTitle {{
+        color: {ACCENT_CYAN};
+        font-size: 12px;
+        font-weight: bold;
+        letter-spacing: 2px;
+        padding: 4px 0;
+    }}
+    QLabel#sectionTitleOrange {{
+        color: {ACCENT_ORANGE};
+        font-size: 12px;
+        font-weight: bold;
+        letter-spacing: 2px;
+        padding: 4px 0;
+    }}
+    QLabel#panelTitle {{
+        color: {NEON_TEXT};
+        font-size: 18px;
+        font-weight: bold;
+        padding: 2px 0 8px;
+    }}
+    QPushButton {{
+        color: {ACCENT_CYAN};
+        background-color: transparent;
+        border: 2px solid {ACCENT_CYAN_DIM};
+        border-radius: 16px;
+        padding: 8px 18px;
+        font-weight: bold;
+    }}
+    QPushButton:hover {{
+        color: {NEON_BACKGROUND};
+        background-color: {ACCENT_CYAN};
+        border-color: {ACCENT_CYAN};
+    }}
+    QPushButton:pressed {{ background-color: {ACCENT_CYAN_DIM}; }}
+    QListWidget {{
+        background-color: {PANEL_FILL};
+        border: 1px solid {ACCENT_CYAN_DIM};
+        border-radius: 16px;
+        color: {NEON_TEXT};
+        selection-color: {NEON_BACKGROUND};
+        selection-background-color: {ACCENT_CYAN};
+    }}
+    QListWidget::item {{ padding: 4px; }}
+    QLineEdit {{
+        background-color: {PANEL_FILL};
+        border: 1px solid {ACCENT_CYAN_DIM};
+        border-radius: 14px;
+        padding: 6px;
+        color: {NEON_TEXT};
+    }}
+    QPlainTextEdit, QScrollArea {{
+        background-color: {PANEL_FILL};
+        border: 1px solid {ACCENT_CYAN_DIM};
+        border-radius: 16px;
+    }}
+    QScrollBar:vertical, QScrollBar:horizontal {{
+        background: {PANEL_FILL};
+        border-radius: 8px;
+        margin: 2px;
+    }}
+    QScrollBar:vertical {{ width: 10px; }}
+    QScrollBar:horizontal {{ height: 10px; }}
+    QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+        background: {ACCENT_CYAN_DIM};
+        border-radius: 8px;
+        min-height: 24px;
+        min-width: 24px;
+    }}
+    QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
+        background: {ACCENT_CYAN};
+    }}
+    QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+    QCheckBox {{ color: {NEON_TEXT}; spacing: 6px; }}
+    QCheckBox::indicator {{
+        width: 14px; height: 14px;
+        border: 1px solid {ACCENT_CYAN_DIM};
+        border-radius: 6px;
+        background: {PANEL_FILL};
+    }}
+    QCheckBox::indicator:checked {{ background: {ACCENT_CYAN}; }}
+"""
+
+
+def panel_style(object_name=None, pad=10):
+    """Softer, rounded neon-edged panel style, theme-consistent."""
+    sel = f"#{object_name}" if object_name else "QWidget"
+    return (
+        f"{sel} {{ background-color: {PANEL_FILL}; "
+        f"border: 2px solid {ACCENT_CYAN}; border-radius: 24px; padding: {pad}px; }}"
+        if object_name
+        else f"background-color: {PANEL_FILL}; border: 2px solid {ACCENT_CYAN}; border-radius: 24px;"
+    )
+
+
+def missing_env_keys():
+    return [key for key in REQUIRED_ENV_KEYS if not os.getenv(key)]
+
+
+def save_env_values(values):
+    lines = []
+    if os.path.exists(ENV_PATH):
+        with open(ENV_PATH, "r", encoding="utf-8") as env_file:
+            lines = env_file.read().splitlines()
+    for key, value in values.items():
+        if not value:
+            continue
+        for index, line in enumerate(lines):
+            if line.startswith(f"{key}="):
+                lines[index] = f"{key}={value}"
+                break
+        else:
+            lines.append(f"{key}={value}")
+    with open(ENV_PATH, "w", encoding="utf-8") as env_file:
+        env_file.write("\n".join(lines) + "\n")
+
+
+class FirstRunSetupDialog(QDialog):
+    """One-time setup form shown on startup while required settings are missing."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("JARVIS — First Run Setup")
+        self.setMinimumWidth(520)
+        self.setStyleSheet(
+            """
+            QWidget {
+                color: #d6fff7;
+                background-color: #0b1113;
+                font-family: 'Cascadia Mono', 'DejaVu Sans Mono', monospace;
+            }
+            QLineEdit {
+                background-color: #101f21;
+                border: 1px solid #286e6b;
+                color: #b8eee4;
+                padding: 6px;
+                border-radius: 4px;
+            }
+            QPushButton {
+                color: #bffef1;
+                background-color: #142326;
+                border: 1px solid #286e6b;
+                border-radius: 6px;
+                padding: 7px 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                color: #071112;
+                background-color: #73f6de;
+            }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+
+        header = QLabel("SETUP REQUIRED\n\nEnter your keys below — they will be saved to ~/.env")
+        header.setStyleSheet("color: #73f6de; font-size: 13px; font-weight: bold;")
+        layout.addWidget(header)
+
+        self.inputs = {}
+        for key, label, optional in SETUP_FIELDS:
+            field_label = QLabel(f"{label}{' (optional)' if optional else ' *'}")
+            field_label.setStyleSheet("color: #9effef; font-size: 11px;")
+            layout.addWidget(field_label)
+            input_field = QLineEdit()
+            input_field.setText(os.getenv(key, ""))
+            self.inputs[key] = input_field
+            layout.addWidget(input_field)
+
+        credentials_row = QHBoxLayout()
+        credentials_exists = os.path.exists(GOOGLE_CREDENTIALS_PATH)
+        self.credentials_status = QLabel(
+            "google_credentials.json: FOUND" if credentials_exists
+            else "google_credentials.json: NOT FOUND"
+        )
+        self.credentials_status.setStyleSheet(
+            f"color: {'#73f6de' if credentials_exists else '#ff4444'}; font-size: 11px;"
+        )
+        browse_button = QPushButton("BROWSE...")
+        browse_button.clicked.connect(self.pick_credentials)
+        credentials_row.addWidget(self.credentials_status, 1)
+        credentials_row.addWidget(browse_button)
+        layout.addLayout(credentials_row)
+
+        buttons = QHBoxLayout()
+        save_button = QPushButton("SAVE && START")
+        save_button.clicked.connect(self.save_and_close)
+        skip_button = QPushButton("SKIP")
+        skip_button.clicked.connect(self.reject)
+        buttons.addWidget(save_button)
+        buttons.addWidget(skip_button)
+        layout.addLayout(buttons)
+
+    def pick_credentials(self):
+        source, _ = QFileDialog.getOpenFileName(
+            self, "Select google_credentials.json", os.path.expanduser("~"), "JSON files (*.json)"
+        )
+        if source:
+            shutil.copy(source, GOOGLE_CREDENTIALS_PATH)
+            self.credentials_status.setText("google_credentials.json: COPIED")
+            self.credentials_status.setStyleSheet("color: #73f6de; font-size: 11px;")
+
+    def save_and_close(self):
+        save_env_values({key: field.text().strip() for key, field in self.inputs.items()})
+        self.accept()
+
+
+def append_backlog_task(name, description):
+    """Append a task row to the backlog Google Sheet. Returns (ok, message)."""
+    backlog_sheet_id = os.getenv("BACKLOG_SHEET_ID", "")
+    if not backlog_sheet_id:
+        return False, "BACKLOG_SHEET_ID not set"
+    token_path = os.path.expanduser("~/.google_sheets_token.json")
+    credentials = None
+    if os.path.exists(token_path):
+        credentials = Credentials.from_authorized_user_file(token_path, GOOGLE_SHEETS_SCOPES)
+    if credentials and credentials.expired and credentials.refresh_token:
+        credentials.refresh(Request())
+    if not credentials or not credentials.valid:
+        return False, "Sheets not authorized (restart app to sign in)"
+    service = build("sheets", "v4", credentials=credentials)
+    try:
+        service.spreadsheets().values().append(
+            spreadsheetId=backlog_sheet_id,
+            range="A1",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": [[name, description, "Начало"]]},
+        ).execute()
+    except Exception as error:
+        if "insufficient" in str(error).lower() or "403" in str(error):
+            return False, "No write access: delete ~/.google_sheets_token.json and restart to re-auth"
+        raise
+    return True, "Saved to backlog sheet"
+
+
+def save_task_to_backlog_sheet(name, description, notifier, item):
+    """Save a task in the background; result arrives via notifier.sheet_save_result."""
+    def worker():
+        try:
+            ok, message = append_backlog_task(name, description)
+        except Exception as error:
+            ok, message = False, str(error)[:60]
+        notifier.sheet_save_result.emit(item, ok, message)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 # Extended HUD Data Workers
@@ -136,37 +470,17 @@ class TasksWorker(QThread):
     def run(self):
         while self.running:
             try:
-                # Try to fetch from Google Sheets
-                credentials_path = os.path.expanduser("~/google_credentials.json")
-                token_path = os.path.expanduser("~/.google_sheets_token.json")
-                
-                credentials = None
-                if os.path.exists(token_path):
-                    credentials = Credentials.from_authorized_user_file(
-                        token_path, GOOGLE_SHEETS_SCOPES
-                    )
-                
-                if credentials and credentials.expired and credentials.refresh_token:
-                    credentials.refresh(Request())
-                
-                if not credentials or not credentials.valid:
-                    if not os.path.exists(credentials_path):
-                        self.status_changed.emit("TASKS: NO CREDENTIALS")
-                        self.tasks_updated.emit([], [])
-                        for _ in range(60):
-                            if not self.running:
-                                return
-                            threading.Event().wait(1)
-                        continue
-                    
-                    flow = InstalledAppFlow.from_client_secrets_file(
-                        credentials_path, GOOGLE_SHEETS_SCOPES
-                    )
-                    credentials = run_google_oauth(flow)
-                
-                with open(token_path, "w", encoding="utf-8") as token_file:
-                    token_file.write(credentials.to_json())
-                
+                # One shared token for all Google APIs (Sheets+Calendar)
+                credentials = get_google_credentials(self.status_changed.emit)
+                if not credentials:
+                    self.status_changed.emit("TASKS: NO CREDENTIALS")
+                    self.tasks_updated.emit([], [])
+                    for _ in range(60):
+                        if not self.running:
+                            return
+                        threading.Event().wait(1)
+                    continue
+
                 service = build("sheets", "v4", credentials=credentials)
                 
                 # Get sheet IDs from environment
@@ -290,7 +604,7 @@ class YouTubeWorker(QThread):
                 
                 self.videos_updated.emit(videos)
             except Exception as e:
-                self.status_changed.emit(f"YOUTUBE: {str(e)[:50]}")
+                self.status_changed.emit(f"YOUTUBE: {str(e)[:200]}")
             
             for _ in range(120):
                 if not self.running:
@@ -314,24 +628,35 @@ class NewsWorker(QThread):
             try:
                 news_items = []
                 
-                # Monitor AI news from major sources
+                # Monitor AI news from major sources via RSS/Atom feeds
                 sources = [
-                    ("https://techcrunch.com/tag/artificial-intelligence/", "TechCrunch AI"),
+                    ("https://techcrunch.com/category/artificial-intelligence/feed/", "TechCrunch AI"),
+                    ("https://feeds.arstechnica.com/arstechnica/technology-lab", "Ars Technica"),
+                    ("https://www.wired.com/feed/tag/ai/latest/rss", "Wired AI"),
+                    ("https://www.theverge.com/rss/ai-artificial-intelligence/index.xml", "The Verge AI"),
                 ]
-                
+
                 for url, source_name in sources:
                     try:
                         response = requests.get(url, timeout=10, headers={
                             "User-Agent": "Mozilla/5.0"
                         })
-                        soup = BeautifulSoup(response.content, "html.parser")
-                        
-                        for article in soup.find_all("a", class_="post-block__title__link")[:3]:
-                            title = article.get_text().strip()
-                            link = article.get("href", "")
+                        try:
+                            soup = BeautifulSoup(response.content, "xml")
+                        except Exception:
+                            soup = BeautifulSoup(response.content, "html.parser")
+
+                        # RSS uses <item>, Atom uses <entry> with <link href="..."/>
+                        for entry in soup.find_all(["item", "entry"])[:3]:
+                            title_tag = entry.find("title")
+                            link_tag = entry.find("link")
+                            title = title_tag.get_text().strip() if title_tag else ""
+                            link = ""
+                            if link_tag:
+                                link = link_tag.get("href") or link_tag.get_text().strip()
                             if title and link:
                                 news_items.append((title[:80], link, source_name))
-                    except:
+                    except Exception:
                         pass
                 
                 self.news_updated.emit(news_items)
@@ -357,27 +682,13 @@ class CalendarWorker(QThread):
         self.running = False
 
     def run(self):
-        credentials_path = os.path.expanduser("~/google_credentials.json")
-        token_path = os.path.expanduser("~/.google_calendar_token.json")
         try:
-            credentials = None
-            if os.path.exists(token_path):
-                credentials = Credentials.from_authorized_user_file(
-                    token_path, GOOGLE_CALENDAR_SCOPES
-                )
-            if credentials and credentials.expired and credentials.refresh_token:
-                credentials.refresh(Request())
-            if not credentials or not credentials.valid:
-                if not os.path.exists(credentials_path):
-                    self.status_changed.emit("CALENDAR: CREDENTIALS NOT FOUND")
-                    self.update_weather()
-                    return
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    credentials_path, GOOGLE_CALENDAR_SCOPES
-                )
-                credentials = run_google_oauth(flow)
-            with open(token_path, "w", encoding="utf-8") as token_file:
-                token_file.write(credentials.to_json())
+            # One shared token for all Google APIs (Sheets+Calendar)
+            credentials = get_google_credentials(self.status_changed.emit)
+            if not credentials:
+                self.status_changed.emit("CALENDAR: CREDENTIALS NOT FOUND")
+                self.update_weather()
+                return
 
             service = build("calendar", "v3", credentials=credentials)
             while self.running:
@@ -485,8 +796,11 @@ class TelegramWorker(QThread):
 
                 messages.sort(key=lambda item: item[0], reverse=True)
                 if messages:
-                    output = "\n\n".join(
-                        f"{name}: {text[:180]}" for _, name, text in messages[:5]
+                    # One-line ticker: up to the first line break or 26 chars of
+                    # each of the last 5 messages, joined with a separator.
+                    output = "  •  ".join(
+                        f"{name}: {text.splitlines()[0][:26] if text.strip() else ''}"
+                        for _, name, text in messages[:5]
                     )
                     self.messages_ready.emit(output)
                 else:
@@ -516,53 +830,68 @@ class TelegramWorker(QThread):
 
 
 class RadialIndicator(QWidget):
-    """Radial financial indicator for BTC/USDT or USD/UAH"""
+    """Radial financial indicator for BTC/USDT or USD/UAH (mockup neon ring style)"""
     def __init__(self, label, value, change=0, parent=None):
         super().__init__(parent)
         self.label = label
         self.value = value
         self.change = change
-        self.setMinimumSize(180, 180)
+        self.setMinimumSize(190, 190)
 
     def paintEvent(self, event):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
+
         center = self.rect().center()
-        radius = 80
-        
-        # Outer circle
-        painter.setPen(QPen(QColor("#173f42"), 2))
-        painter.drawEllipse(center, radius, radius)
-        
-        # Inner arc (based on change %)
+        accent = QColor(ACCENT_CYAN) if self.change >= 0 else QColor(ACCENT_ORANGE)
+        outer = int(min(self.width(), self.height()) / 2 - 8)
+        inner = outer - 22
+
+        # Tick-mark outer ring
+        painter.setPen(QPen(QColor(ACCENT_CYAN_DIM), 2))
+        painter.drawEllipse(center, outer, outer)
+        for deg in range(0, 360, 6):
+            long_tick = deg % 30 == 0
+            r0 = outer - (8 if long_tick else 4)
+            a = math.radians(deg)
+            x0 = center.x() + r0 * math.cos(a)
+            y0 = center.y() + r0 * math.sin(a)
+            x1 = center.x() + outer * math.cos(a)
+            y1 = center.y() + outer * math.sin(a)
+            painter.setPen(QPen(accent if long_tick else QColor(ACCENT_CYAN_DIM), 2 if long_tick else 1))
+            painter.drawLine(int(x0), int(y0), int(x1), int(y1))
+
+        # Glowing progress arc (change %)
         change_normalized = min(max((self.change + 100) / 200 * 100, 0), 100)
-        painter.setPen(QPen(QColor("#73f6de" if self.change >= 0 else "#ff4444"), 4))
-        painter.drawArc(
-            int(center.x() - radius), int(center.y() - radius),
-            radius * 2, radius * 2, 0, int(change_normalized * 3.6 * 16)
-        )
-        
+        span = int(change_normalized * 3.6 * 16)
+        for width, alpha in ((9, 60), (6, 130), (3, 255)):
+            glow = QColor(accent)
+            glow.setAlpha(alpha)
+            painter.setPen(QPen(glow, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawArc(
+                int(center.x() - inner), int(center.y() - inner),
+                inner * 2, inner * 2, 90 * 16, -span
+            )
+
         # Label
-        painter.setPen(QColor("#9effef"))
+        painter.setPen(QColor(NEON_MUTED))
         painter.setFont(QFont("Cascadia Mono", 10, QFont.Weight.Bold))
-        painter.drawText(self.rect().adjusted(0, 40, 0, 0), Qt.AlignmentFlag.AlignHCenter, self.label)
-        
-        # Value
-        painter.setFont(QFont("Cascadia Mono", 14, QFont.Weight.Bold))
-        painter.drawText(self.rect().adjusted(0, 75, 0, 0), Qt.AlignmentFlag.AlignHCenter, f"{self.value:g}")
-        
+        painter.drawText(self.rect().adjusted(0, 46, 0, 0), Qt.AlignmentFlag.AlignHCenter, self.label)
+
+        # Value (bright)
+        painter.setPen(QColor(NEON_TEXT))
+        painter.setFont(QFont("Cascadia Mono", 16, QFont.Weight.Bold))
+        painter.drawText(self.rect().adjusted(0, 78, 0, 0), Qt.AlignmentFlag.AlignHCenter, f"{self.value:g}")
+
         # Change percentage
-        change_color = QColor("#73f6de") if self.change >= 0 else QColor("#ff4444")
-        painter.setPen(change_color)
+        painter.setPen(accent)
         painter.setFont(QFont("Cascadia Mono", 9))
         painter.drawText(
             self.rect().adjusted(0, 120, 0, 0),
             Qt.AlignmentFlag.AlignHCenter,
             f"{self.change:+.2f}%"
         )
-
 
 class NewsCarousel(QWidget):
     """News ticker with scrolling text"""
@@ -618,39 +947,308 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 
-class HudGauge(QWidget):
-    def __init__(self, title, value, suffix="%", parent=None):
+class TelegramTicker(QWidget):
+    """One-line horizontally scrolling Telegram ticker (compact, clickable)."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.title = title
-        self.value = value
-        self.suffix = suffix
-        self.setMinimumSize(112, 112)
+        self.text = "TELEGRAM: STARTING..."
+        self.scroll_pos = 0
+        self.setFixedHeight(34)
+        self.setMinimumWidth(250)
+        self.setMaximumWidth(450)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(
+            "background-color: #101f21; border: 1px solid #286e6b; border-radius: 12px;"
+        )
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(50)
+
+    def setText(self, text):
+        self.text = text
+        self.scroll_pos = self.width()
+        self.update()
+
+    def _tick(self):
+        self.scroll_pos -= 2
+        if self.scroll_pos < -self._text_width():
+            self.scroll_pos = self.width()
+        self.update()
+
+    def _text_width(self):
+        return self.fontMetrics().horizontalAdvance(self.text) + 40
+
+    def mousePressEvent(self, event):
+        self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setClipRect(self.rect().adjusted(8, 0, -8, 0))
+        painter.setPen(QColor("#bffef1"))
+        painter.setFont(QFont("Cascadia Mono", 11))
+        painter.drawText(
+            int(self.scroll_pos), 0, self._text_width() + self.width(), self.height(),
+            Qt.AlignmentFlag.AlignVCenter, self.text,
+        )
+        painter.end()
+
+
+class ThumbnailLoader(QThread):
+    """Fetch a video thumbnail off the UI thread."""
+    loaded = pyqtSignal(bytes)
+
+    def __init__(self, url, parent=None):
+        super().__init__(parent)
+        self.url = url
+
+    def run(self):
+        try:
+            with urllib.request.urlopen(self.url, timeout=8) as resp:
+                self.loaded.emit(resp.read())
+        except Exception:
+            pass
+
+
+class VideoCard(QFrame):
+    """Thumbnail + title + neon PLAY button, mockup style."""
+    def __init__(self, title, video_id, thumbnail_url, parent=None):
+        super().__init__(parent)
+        self.video_id = video_id
+        self.setStyleSheet(
+            f"QFrame {{ background-color: {PANEL_FILL}; border: 1px solid {ACCENT_CYAN_DIM}; border-radius: 10px; }}"
+        )
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(10)
+
+        self.thumb = QLabel()
+        self.thumb.setFixedSize(84, 48)
+        self.thumb.setStyleSheet(f"border: 1px solid {ACCENT_CYAN_DIM}; border-radius: 4px; background: #000;")
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.thumb)
+
+        title_lbl = QLabel(title)
+        title_lbl.setWordWrap(True)
+        title_lbl.setStyleSheet(f"color: {NEON_TEXT}; border: none; font-size: 12px;")
+        lay.addWidget(title_lbl, 1)
+
+        play = QPushButton("PLAY")
+        play.setStyleSheet("padding: 4px 2px; font-size: 10px;")
+        play.setFixedWidth(46)
+        play.setCursor(Qt.CursorShape.PointingHandCursor)
+        play.clicked.connect(self.play)
+        lay.addWidget(play)
+
+        if thumbnail_url:
+            loader = ThumbnailLoader(thumbnail_url, self)
+            loader.loaded.connect(self._set_thumb)
+            loader.start()
+            self._loader = loader
+
+    def _set_thumb(self, data):
+        pix = QPixmap()
+        pix.loadFromData(data)
+        if not pix.isNull():
+            self.thumb.setPixmap(pix.scaled(84, 48, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation))
+
+    def play(self):
+        webbrowser.open(f"https://www.youtube.com/watch?v={self.video_id}")
+
+
+class HudRingCenterpiece(QWidget):
+    """Decorative concentric neon HUD ring (mockup centerpiece, static + slow rotation)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.angle = 0
+        self.setMinimumSize(200, 200)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(60)
+
+    def _tick(self):
+        self.angle = (self.angle + 1) % 360
+        self.update()
 
     def paintEvent(self, event):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         center = self.rect().center()
-        radius = min(self.width(), self.height()) / 2 - 10
+        max_r = int(min(self.width(), self.height()) / 2 - 6)
 
-        painter.setPen(QPen(QColor("#173f42"), 2))
-        painter.drawEllipse(center, int(radius), int(radius))
-        painter.setPen(QPen(QColor("#286e6b"), 5))
+        # Faint concentric guide rings
+        for frac, alpha in ((1.0, 40), (0.8, 30), (0.6, 22)):
+            c = QColor(ACCENT_CYAN_DIM)
+            c.setAlpha(alpha)
+            painter.setPen(QPen(c, 1))
+            painter.drawEllipse(center, int(max_r * frac), int(max_r * frac))
+
+        # Glowing segmented arcs rotating at different speeds
+        arcs = [
+            (max_r, ACCENT_CYAN, self.angle, 70, 5),
+            (int(max_r * 0.8), ACCENT_ORANGE, -self.angle * 2, 50, 4),
+            (int(max_r * 0.6), ACCENT_CYAN, self.angle * 3, 100, 3),
+        ]
+        for radius, color, start, span, width in arcs:
+            for w, alpha in ((width + 4, 50), (width, 220)):
+                glow = QColor(color)
+                glow.setAlpha(alpha)
+                painter.setPen(QPen(glow, w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                painter.drawArc(
+                    int(center.x() - radius), int(center.y() - radius),
+                    radius * 2, radius * 2, int(start * 16), int(span * 16)
+                )
+
+        # Bright core dot
+        core = QColor(ACCENT_CYAN)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(core)
+        painter.drawEllipse(center, 5, 5)
+
+
+class _SphereBase(QWidget):
+    """Shared particle-globe logic: Fibonacci point cloud + rotation timer."""
+
+    def __init__(self, parent=None, points=420):
+        super().__init__(parent)
+        self.angle = 0.0
+        self.setMinimumSize(220, 220)
+        # Fibonacci-distributed points on a unit sphere
+        self._pts = []
+        golden = math.pi * (3.0 - math.sqrt(5.0))
+        for i in range(points):
+            y = 1.0 - (i / float(points - 1)) * 2.0
+            r = math.sqrt(max(0.0, 1.0 - y * y))
+            theta = golden * i
+            self._pts.append((math.cos(theta) * r, y, math.sin(theta) * r))
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(40)
+
+    def _tick(self):
+        self.angle = (self.angle + 0.6) % 360.0
+        self.update()
+
+    @staticmethod
+    def _rgba(hex_color):
+        h = hex_color.lstrip('#')
+        return tuple(int(h[i:i+2], 16) / 255.0 for i in (0, 2, 4))
+
+
+class SoftwareSphereWidget(_SphereBase):
+    """Pure-QPainter particle globe. No OpenGL dependency; always works."""
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor(NEON_BACKGROUND))
+
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        R = min(self.width(), self.height()) * 0.42
+        ay = math.radians(self.angle)
+        tilt = math.radians(18.0)
+        cos_ay, sin_ay = math.cos(ay), math.sin(ay)
+        cos_t, sin_t = math.cos(tilt), math.sin(tilt)
+
+        cyan = QColor(ACCENT_CYAN)
+        orange = QColor(ACCENT_ORANGE)
+        projected = []
+        for i, (x, y, z) in enumerate(self._pts):
+            # rotate about Y then tilt about X
+            x1 = x * cos_ay + z * sin_ay
+            z1 = -x * sin_ay + z * cos_ay
+            y1 = y * cos_t - z1 * sin_t
+            z2 = y * sin_t + z1 * cos_t
+            projected.append((cx + x1 * R, cy - y1 * R, z2, i))
+
+        # draw far points first so near points overlay them
+        projected.sort(key=lambda p: p[2])
+        for sx, sy, z, i in projected:
+            depth = (z + 1.0) * 0.5  # 0 far .. 1 near
+            base = cyan if (i % 11) else orange
+            # soft glow pass then bright core
+            for size, alpha in ((7.0, 0.16), (3.0, 0.9)):
+                a = int(255 * alpha * (0.25 + 0.75 * depth))
+                c = QColor(base)
+                c.setAlpha(a)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(c)
+                r = size * (0.6 + 0.4 * depth) / 2.0
+                painter.drawEllipse(int(sx - r), int(sy - r), int(r * 2), int(r * 2))
+        painter.end()
+
+
+# The globe is always rendered in software (QPainter). A QOpenGLWidget would
+# conflict with QtWebEngine's window compositor on Windows (D3D11), spamming
+# "'D3D11' is not compatible with QOpenGLWidget" and failing to render, so we
+# deliberately avoid GL here. The software globe looks identical.
+def NeonSphereWidget(parent=None, points=420):
+    """Return the neon particle globe (software-rendered)."""
+    return SoftwareSphereWidget(parent, points)
+
+
+class HudGauge(QWidget):
+    """CPU/RAM gauge in the same neon ring style as RadialIndicator."""
+    def __init__(self, title, value, suffix="%", parent=None):
+        super().__init__(parent)
+        self.title = title
+        self.value = value
+        self.suffix = suffix
+        self.setMinimumSize(124, 124)
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        center = self.rect().center()
+        outer = int(min(self.width(), self.height()) / 2 - 8)
+        inner = outer - 16
+
+        # Tick-mark outer ring
+        painter.setPen(QPen(QColor(ACCENT_CYAN_DIM), 2))
+        painter.drawEllipse(center, outer, outer)
+        for deg in range(0, 360, 15):
+            long_tick = deg % 45 == 0
+            r0 = outer - (7 if long_tick else 4)
+            a = math.radians(deg)
+            x0 = center.x() + r0 * math.cos(a)
+            y0 = center.y() + r0 * math.sin(a)
+            x1 = center.x() + outer * math.cos(a)
+            y1 = center.y() + outer * math.sin(a)
+            painter.setPen(QPen(QColor(ACCENT_CYAN) if long_tick else QColor(ACCENT_CYAN_DIM), 2 if long_tick else 1))
+            painter.drawLine(int(x0), int(y0), int(x1), int(y1))
+
+        # Dim track arc (0-100 scale, 285 deg sweep starting at 35 deg)
+        painter.setPen(QPen(QColor(ACCENT_CYAN_DIM), 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawArc(
-            int(center.x() - radius), int(center.y() - radius),
-            int(radius * 2), int(radius * 2), 35 * 16, 285 * 16
+            int(center.x() - inner), int(center.y() - inner),
+            inner * 2, inner * 2, 35 * 16, 285 * 16
         )
-        painter.setPen(QPen(QColor("#73f6de"), 5))
-        painter.drawArc(
-            int(center.x() - radius), int(center.y() - radius),
-            int(radius * 2), int(radius * 2), 35 * 16, int(-self.value * 2.85 * 16)
-        )
-        painter.setPen(QColor("#9effef"))
+
+        # Glowing value arc (orange when hot, cyan otherwise)
+        accent = QColor(ACCENT_ORANGE) if self.value >= 85 else QColor(ACCENT_CYAN)
+        span = int(min(max(self.value, 0), 100) * 2.85 * 16)
+        for width, alpha in ((9, 60), (6, 130), (3, 255)):
+            glow = QColor(accent)
+            glow.setAlpha(alpha)
+            painter.setPen(QPen(glow, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawArc(
+                int(center.x() - inner), int(center.y() - inner),
+                inner * 2, inner * 2, 35 * 16, -span
+            )
+
+        painter.setPen(QColor(NEON_MUTED))
         painter.setFont(QFont("Cascadia Mono", 9, QFont.Weight.Bold))
-        painter.drawText(self.rect().adjusted(8, 20, -8, -48), Qt.AlignmentFlag.AlignCenter, self.title)
+        painter.drawText(self.rect().adjusted(8, 22, -8, -52), Qt.AlignmentFlag.AlignCenter, self.title)
+        painter.setPen(QColor(NEON_TEXT))
         painter.setFont(QFont("Cascadia Mono", 16, QFont.Weight.Bold))
-        painter.drawText(self.rect().adjusted(8, 40, -8, -20), Qt.AlignmentFlag.AlignCenter, f"{self.value:g}{self.suffix}")
-
+        painter.drawText(self.rect().adjusted(8, 42, -8, -20), Qt.AlignmentFlag.AlignCenter, f"{self.value:g}{self.suffix}")
 
 class EmbeddedTerminal(QPlainTextEdit):
     def __init__(self, parent=None):
@@ -709,62 +1307,138 @@ class EmbeddedTerminal(QPlainTextEdit):
                 self.process.kill()
 
 
-class ExtendedHUD(QWidget):
+class HudDataMixin:
+    """Shared update handlers for HUD panels (financial, tasks, videos, news, task form).
+
+    Classes using this mixin must define the widget attributes referenced below.
+    """
+
+    hud_task_limit = 5
+    hud_item_max_len = 50
+    hud_title_max_len = 40
+    hud_news_title_max_len = 35
+    hud_use_carousel = True
+    hud_task_prefix = "ext_"
+
+    def _hud_attr(self, name):
+        return getattr(self, f"{self.hud_task_prefix}{name}")
+
+    def update_financial_data(self, data):
+        self.btc_indicator.value = data.get("btc_price", 0)
+        self.btc_indicator.change = data.get("btc_change", 0)
+        self.btc_indicator.update()
+
+        self.uah_indicator.value = data.get("uah_rate", 0)
+        self.uah_indicator.update()
+
+    def update_tasks(self, sprint_tasks, backlog_tasks):
+        sprint_list = self._hud_attr("sprint_list")
+        backlog_list = self._hud_attr("backlog_list")
+
+        sprint_list.clear()
+        for task in sprint_tasks[:self.hud_task_limit]:
+            if len(task) >= 2:
+                item_text = f"{task[0]} ({task[1]})" if len(task) > 1 else task[0]
+                sprint_list.addItem(QListWidgetItem(item_text[:self.hud_item_max_len]))
+
+        backlog_list.clear()
+        for task in backlog_tasks[:self.hud_task_limit]:
+            if len(task) >= 1:
+                backlog_list.addItem(QListWidgetItem(task[0][:self.hud_item_max_len]))
+
+    def update_video_status(self, status):
+        video_list = self._hud_attr("video_list")
+        video_list.clear()
+        video_list.addItem(status)
+
+    def update_videos(self, videos):
+        video_list = self._hud_attr("video_list")
+        video_list.clear()
+        if not videos:
+            video_list.addItem("NO VIDEOS — check YOUTUBE_API_KEY or network")
+            return
+        for title, video_id, thumbnail in videos:
+            card = VideoCard(title[:self.hud_title_max_len], video_id, thumbnail)
+            item = QListWidgetItem()
+            item.setSizeHint(card.sizeHint())
+            item.setData(Qt.ItemDataRole.UserRole, video_id)
+            video_list.addItem(item)
+            video_list.setItemWidget(item, card)
+
+    def play_video(self, item):
+        video_id = item.data(Qt.ItemDataRole.UserRole)
+        webbrowser.open(f"https://www.youtube.com/watch?v={video_id}")
+
+    def update_news(self, news_items):
+        if self.hud_use_carousel:
+            self._hud_attr("news_carousel").set_news(news_items)
+
+        news_list = self._hud_attr("news_list")
+        news_list.clear()
+        if not news_items:
+            news_list.addItem("NO NEWS AVAILABLE")
+            return
+        for title, link, source in news_items:
+            item = QListWidgetItem(f"[{source}] {title[:self.hud_news_title_max_len]}")
+            item.setData(Qt.ItemDataRole.UserRole, link)
+            news_list.addItem(item)
+
+    def open_news(self, item):
+        link = item.data(Qt.ItemDataRole.UserRole)
+        webbrowser.open(link)
+
+    def show_add_task_form(self):
+        self._hud_attr("task_form").show()
+        self._hud_attr("task_name_input").setFocus()
+
+    def hide_add_task_form(self):
+        self._hud_attr("task_form").hide()
+        self._hud_attr("task_name_input").clear()
+        self._hud_attr("task_desc_input").clear()
+
+    def save_task(self):
+        name = self._hud_attr("task_name_input").text()
+        desc = self._hud_attr("task_desc_input").text()
+        if name:
+            item = QListWidgetItem(f"{name[:30]} - {desc[:15]}")
+            self._hud_attr("backlog_list").addItem(item)
+            self.hide_add_task_form()
+            save_task_to_backlog_sheet(name, desc, self, item)
+
+    def on_sheet_save_result(self, item, ok, message):
+        if ok:
+            item.setText(f"{item.text()} ✓")
+        else:
+            item.setText(f"⚠ NOT SAVED ({message}): {item.text()}")
+
+
+class ExtendedHUD(HudDataMixin, QWidget):
     """Extended HUD for second monitor with task management, financial data, and news"""
-    
-    def __init__(self):
-        super().__init__()
+
+    hud_task_limit = 10
+    hud_item_max_len = 10_000  # extended HUD shows full task text
+    hud_title_max_len = 60
+    hud_news_title_max_len = 10_000  # full headlines
+    hud_task_prefix = "ext_"
+
+    sheet_save_result = pyqtSignal(object, bool, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self.setWindowTitle("Extended HUD")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnBottomHint)
         
-        self.setStyleSheet("""
-            QWidget {
-                color: #d6fff7;
-                background-color: #0b1113;
-                font-family: 'Cascadia Mono', 'DejaVu Sans Mono', monospace;
-            }
-            QLabel#sectionTitle {
-                color: #73f6de;
-                font-size: 11px;
-                font-weight: bold;
-                letter-spacing: 1px;
-            }
-            QPushButton {
-                color: #bffef1;
-                background-color: #142326;
-                border: 1px solid #286e6b;
-                border-radius: 6px;
-                padding: 6px 10px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #73f6de;
-                color: #071112;
-            }
-            QListWidget {
-                background-color: #0d1719;
-                border: 1px solid #286e6b;
-                color: #b8eee4;
-            }
-            QLineEdit {
-                background-color: #101f21;
-                border: 1px solid #286e6b;
-                color: #b8eee4;
-                padding: 6px;
-                border-radius: 4px;
-            }
-        """)
+        self.setStyleSheet(HUD_THEME_STYLESHEET)
         
-        # Setup for second monitor
+        # Live-wallpaper: cover the ENTIRE target screen (over the taskbar).
         screens = QApplication.screens()
         if len(screens) > 1:
             screen_geometry = screens[1].geometry()
-            self.setGeometry(screen_geometry)
         else:
-            # Fallback: offset from primary screen
-            primary_geometry = QApplication.primaryScreen().geometry()
-            self.setGeometry(primary_geometry.width(), 0, primary_geometry.width(), primary_geometry.height())
-        
+            screen_geometry = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen_geometry)
+        self.setFixedSize(screen_geometry.width(), screen_geometry.height())
+
         # Main layout
         main_layout = QHBoxLayout()
         main_layout.setContentsMargins(16, 16, 16, 16)
@@ -783,7 +1457,9 @@ class ExtendedHUD(QWidget):
         main_layout.addWidget(right_panel, 1)
         
         self.setLayout(main_layout)
-        
+
+        self.sheet_save_result.connect(self.on_sheet_save_result)
+
         # Workers are started by the main application; ExtendedHUD will receive updates via connected signals.
         self.status_label = QLabel("EXTENDED HUD: IDLE")
         self.status_label.setStyleSheet("color: #b8eee4;")
@@ -791,7 +1467,7 @@ class ExtendedHUD(QWidget):
 
     def create_task_panel(self):
         panel = QWidget()
-        panel.setStyleSheet("background-color: #0e191b; border: 1px solid #1f4f4e; border-radius: 12px; padding: 12px;")
+        panel.setStyleSheet(panel_style(pad=12))
         layout = QVBoxLayout(panel)
         
         title = QLabel("SPRINT ИМ")
@@ -818,7 +1494,7 @@ class ExtendedHUD(QWidget):
         layout.addSpacing(10)
         
         add_task_btn = QPushButton("+ ДОБАВИТЬ В БЭКЛОГ")
-        add_task_btn.clicked.connect(self.show_ext_add_task_form)
+        add_task_btn.clicked.connect(self.show_add_task_form)
         layout.addWidget(add_task_btn)
         
         self.ext_task_form = QWidget()
@@ -837,9 +1513,9 @@ class ExtendedHUD(QWidget):
         
         form_buttons = QHBoxLayout()
         save_btn = QPushButton("СОХР")
-        save_btn.clicked.connect(self.save_ext_task)
+        save_btn.clicked.connect(self.save_task)
         cancel_btn = QPushButton("ОТМЕН")
-        cancel_btn.clicked.connect(self.hide_ext_add_task_form)
+        cancel_btn.clicked.connect(self.hide_add_task_form)
         form_buttons.addWidget(save_btn)
         form_buttons.addWidget(cancel_btn)
         task_form_layout.addLayout(form_buttons)
@@ -852,7 +1528,7 @@ class ExtendedHUD(QWidget):
 
     def create_financial_panel(self):
         panel = QWidget()
-        panel.setStyleSheet("background-color: #0e191b; border: 1px solid #1f4f4e; border-radius: 12px; padding: 12px;")
+        panel.setStyleSheet(panel_style(pad=12))
         layout = QVBoxLayout(panel)
         
         title = QLabel("FINANCIAL TERMINAL")
@@ -871,25 +1547,31 @@ class ExtendedHUD(QWidget):
         layout.addWidget(divider)
         
         media_title = QLabel("MEDIA CAROUSEL")
-        media_title.setObjectName("sectionTitle")
+        media_title.setObjectName("sectionTitleOrange")
         layout.addWidget(media_title)
         
         self.ext_video_list = QListWidget()
-        self.ext_video_list.setMaximumHeight(150)
+        self.ext_video_list.setMinimumHeight(220)
+        self.ext_video_list.setMaximumHeight(320)
+        self.ext_video_list.itemDoubleClicked.connect(self.play_video)
         layout.addWidget(self.ext_video_list)
-        
+
         layout.addStretch()
         return panel
 
     def create_news_panel(self):
         panel = QWidget()
-        panel.setStyleSheet("background-color: #0e191b; border: 1px solid #1f4f4e; border-radius: 12px; padding: 12px;")
+        panel.setStyleSheet(panel_style(pad=12))
         layout = QVBoxLayout(panel)
         
         title = QLabel("NEWS HUB")
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
         
+        self.ext_sphere = NeonSphereWidget()
+        self.ext_sphere.setMaximumHeight(280)
+        layout.addWidget(self.ext_sphere, 0, Qt.AlignmentFlag.AlignHCenter)
+
         self.ext_news_carousel = NewsCarousel()
         layout.addWidget(self.ext_news_carousel)
         
@@ -900,108 +1582,22 @@ class ExtendedHUD(QWidget):
         news_scroll.setStyleSheet("QScrollArea { background-color: #0d1719; border: 1px solid #286e6b; }")
         
         self.ext_news_list = QListWidget()
+        self.ext_news_list.itemClicked.connect(self.open_news)
         news_scroll.setWidget(self.ext_news_list)
         layout.addWidget(news_scroll, 1)
         
         layout.addStretch()
         return panel
 
-    def update_financial_data(self, data):
-        self.btc_indicator.value = data.get("btc_price", 0)
-        self.btc_indicator.change = data.get("btc_change", 0)
-        self.btc_indicator.update()
-        
-        self.uah_indicator.value = data.get("uah_rate", 0)
-        self.uah_indicator.update()
-
-    def update_tasks(self, sprint_tasks, backlog_tasks):
-        # Extended HUD lists
-        try:
-            self.ext_sprint_list.clear()
-            for task in sprint_tasks[:10]:
-                if len(task) >= 2:
-                    item_text = f"{task[0]} ({task[1]})" if len(task) > 1 else task[0]
-                    item = QListWidgetItem(item_text)
-                    self.ext_sprint_list.addItem(item)
-        except AttributeError:
-            pass
-        
-        try:
-            self.ext_backlog_list.clear()
-            for task in backlog_tasks[:10]:
-                if len(task) >= 1:
-                    item_text = task[0]
-                    item = QListWidgetItem(item_text)
-                    self.ext_backlog_list.addItem(item)
-        except AttributeError:
-            pass
-
-    def update_videos(self, videos):
-        # Extended HUD video list
-        try:
-            self.ext_video_list.clear()
-            if not videos:
-                self.ext_video_list.addItem("NO VIDEOS — check YOUTUBE_API_KEY or network")
-                return
-            for title, video_id, thumbnail in videos:
-                item = QListWidgetItem(title[:60])
-                item.setData(Qt.ItemDataRole.UserRole, video_id)
-                self.ext_video_list.addItem(item)
-            if self.ext_video_list.count() > 0:
-                self.ext_video_list.itemDoubleClicked.connect(self.play_video)
-        except AttributeError:
-            pass
-
-    def play_video(self, item):
-        video_id = item.data(Qt.ItemDataRole.UserRole)
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        webbrowser.open(url)
-
-    def update_news(self, news_items):
-        try:
-            self.ext_news_carousel.set_news(news_items)
-            self.ext_news_list.clear()
-            if not news_items:
-                self.ext_news_list.addItem("NO NEWS AVAILABLE")
-                return
-            for title, link, source in news_items:
-                item = QListWidgetItem(f"[{source}] {title}")
-                item.setData(Qt.ItemDataRole.UserRole, link)
-                self.ext_news_list.addItem(item)
-            if self.ext_news_list.count() > 0:
-                self.ext_news_list.itemClicked.connect(self.open_news)
-        except AttributeError:
-            pass
-
-    def open_news(self, item):
-        link = item.data(Qt.ItemDataRole.UserRole)
-        webbrowser.open(link)
-
-    def show_ext_add_task_form(self):
-        try:
-            self.ext_task_form.show()
-            self.ext_task_name_input.setFocus()
-        except AttributeError:
-            pass
-
-    def hide_ext_add_task_form(self):
-        try:
-            self.ext_task_form.hide()
-            self.ext_task_name_input.clear()
-            self.ext_task_desc_input.clear()
-        except AttributeError:
-            pass
-
-    def save_ext_task(self):
-        try:
-            name = self.ext_task_name_input.text()
-            desc = self.ext_task_desc_input.text()
-            if name:
-                item = QListWidgetItem(f"{name} - {desc}")
-                self.ext_backlog_list.addItem(item)
-                self.hide_ext_add_task_form()
-        except AttributeError:
-            pass
+    def changeEvent(self, event):
+        # Wallpaper must never be minimized: if a minimize slips through
+        # (e.g. Win+D / Win+M), immediately restore to normal.
+        if (
+            event.type() == QEvent.Type.WindowStateChange
+            and self.isMinimized()
+        ):
+            QTimer.singleShot(0, self.showNormal)
+        super().changeEvent(event)
 
     def closeEvent(self, event):
         # Stop workers if they exist (ExtendedHUD may be used without creating internal workers)
@@ -1032,69 +1628,379 @@ class ExtendedHUD(QWidget):
         event.accept()
 
 
+class EditSettingsDialog(QDialog):
+    """Edit API keys / module settings at runtime (saved to ~/.env)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("JARVIS — Edit Settings")
+        self.setMinimumWidth(520)
+        self.setStyleSheet(
+            """
+            QWidget { color: #d6fff7; background-color: #0b1113;
+                font-family: 'Cascadia Mono', 'DejaVu Sans Mono', monospace; }
+            QLineEdit { background-color: #101f21; border: 1px solid #286e6b;
+                color: #b8eee4; padding: 6px; border-radius: 6px; }
+            QPushButton { color: #bffef1; background-color: #142326;
+                border: 1px solid #286e6b; border-radius: 8px;
+                padding: 7px 12px; font-weight: bold; }
+            QPushButton:hover { color: #071112; background-color: #73f6de; }
+            """
+        )
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+
+        header = QLabel("EDIT SETTINGS\nChanges are saved to ~/.env and applied on next restart.")
+        header.setStyleSheet("color: #73f6de; font-size: 12px; font-weight: bold;")
+        layout.addWidget(header)
+
+        self.inputs = {}
+        for key, label, optional in SETUP_FIELDS:
+            field_label = QLabel(f"{label}{' (optional)' if optional else ''}")
+            field_label.setStyleSheet("color: #9effef; font-size: 11px;")
+            layout.addWidget(field_label)
+            input_field = QLineEdit()
+            input_field.setText(os.getenv(key, ""))
+            self.inputs[key] = input_field
+            layout.addWidget(input_field)
+
+        buttons = QHBoxLayout()
+        save_button = QPushButton("SAVE")
+        save_button.clicked.connect(self._save)
+        cancel_button = QPushButton("CANCEL")
+        cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(save_button)
+        buttons.addWidget(cancel_button)
+        layout.addLayout(buttons)
+
+    def _save(self):
+        save_env_values({key: field.text().strip() for key, field in self.inputs.items()})
+        load_dotenv(ENV_PATH, override=True)
+        self.accept()
+
+
+class SlackBridge(QThread):
+    """Bridge between the AgentChat window and a Slack channel.
+
+    Outgoing: send_user_message() posts the user's text to the channel.
+    Incoming: run() polls the channel history and emits messages from others
+    (i.e. the agent's replies) so the chat window can show them.
+    Requires SLACK_BOT_TOKEN + SLACK_CHANNEL_ID in .env.
+    """
+
+    message_received = pyqtSignal(str, str)  # (author, text)
+    status_changed = pyqtSignal(str)
+
+    API = "https://slack.com/api"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.token = os.getenv("SLACK_BOT_TOKEN", "")
+        self.channel = os.getenv("SLACK_CHANNEL_ID", "")
+        self.running = True
+        self._last_ts = None
+        self._bot_user_id = None
+
+    def stop(self):
+        self.running = False
+
+    def configured(self):
+        return bool(self.token and self.channel)
+
+    def _headers(self):
+        return {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+
+    def _post(self, method, payload):
+        response = requests.post(
+            f"{self.API}/{method}", headers=self._headers(), json=payload, timeout=10
+        )
+        return response.json()
+
+    def send_user_message(self, text):
+        """Post a user message into the channel. Returns (ok, info)."""
+        if not self.configured():
+            return False, "Slack not configured (set SLACK_BOT_TOKEN + SLACK_CHANNEL_ID)"
+        try:
+            data = self._post("chat.postMessage", {"channel": self.channel, "text": text})
+            if data.get("ok"):
+                self._last_ts = data.get("ts", self._last_ts)
+                return True, "sent"
+            return False, data.get("error", "unknown error")
+        except Exception as error:
+            return False, str(error)
+
+    def run(self):
+        if not self.configured():
+            self.status_changed.emit("SLACK: NOT CONFIGURED")
+            return
+        # find our own bot user id so we don't echo our own posts
+        try:
+            auth = self._post("auth.test", {})
+            self._bot_user_id = auth.get("user_id")
+        except Exception:
+            self._bot_user_id = None
+        self.status_changed.emit("SLACK: CONNECTED")
+        while self.running:
+            try:
+                params = {"channel": self.channel, "limit": 20}
+                if self._last_ts:
+                    params["oldest"] = self._last_ts
+                data = requests.get(
+                    f"{self.API}/conversations.history",
+                    headers=self._headers(),
+                    params=params,
+                    timeout=10,
+                ).json()
+                if data.get("ok"):
+                    messages = data.get("messages", [])
+                    # history returns newest first; replay oldest first
+                    for msg in reversed(messages):
+                        ts = msg.get("ts")
+                        if self._last_ts and ts <= self._last_ts:
+                            continue
+                        if msg.get("user") == self._bot_user_id:
+                            continue
+                        subtype = msg.get("subtype")
+                        if subtype in ("channel_join", "channel_leave"):
+                            continue
+                        author = msg.get("user") or msg.get("bot_id") or "agent"
+                        self.message_received.emit(author, msg.get("text", ""))
+                    if messages:
+                        self._last_ts = messages[0].get("ts", self._last_ts)
+                else:
+                    self.status_changed.emit(f"SLACK: {data.get('error', 'error')}")
+            except Exception as error:
+                self.status_changed.emit(f"SLACK: {error}")
+            for _ in range(4):
+                if not self.running:
+                    return
+                threading.Event().wait(1)
+
+
+class AgentChat(QWidget):
+    """Small 'chat with the agent' window for the second monitor.
+
+    Buttons: Restart app, Start/Stop the agent loop, open the Pull Request,
+    and one combined button that runs `git pull` then restarts the app.
+    A progress bar estimates how long the current agent task has left.
+    """
+
+    def __init__(self, panel=None, parent=None):
+        super().__init__(parent)
+        self.panel = panel
+        self.setWindowTitle("JARVIS — Agent Chat")
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setFixedSize(340, 460)
+        self.setStyleSheet(HUD_THEME_STYLESHEET)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        title = QLabel("AGENT CHAT")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        # chat log
+        self.chat = QTextEdit()
+        self.chat.setReadOnly(True)
+        self.chat.setStyleSheet(
+            "background-color: #0d1719; border: 1px solid #286e6b; "
+            "border-radius: 10px; padding: 8px; font-size: 12px; color: #a9e6dd;"
+        )
+        layout.addWidget(self.chat, 1)
+        self._say("agent", "Слушаю, сэр. Чем помочь?")
+
+        # input row
+        input_row = QHBoxLayout()
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("Напишите сообщение...")
+        self.input.returnPressed.connect(self._send)
+        send_btn = QPushButton("➤")
+        send_btn.setFixedWidth(40)
+        send_btn.clicked.connect(self._send)
+        input_row.addWidget(self.input, 1)
+        input_row.addWidget(send_btn)
+        layout.addLayout(input_row)
+
+        # progress: estimated time remaining for the current agent task
+        self.progress_label = QLabel("Agent: idle")
+        self.progress_label.setStyleSheet("color: #5fb8ac; font-size: 11px;")
+        layout.addWidget(self.progress_label)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        layout.addWidget(self.progress)
+        self._progress_timer = QTimer(self)
+        self._progress_timer.timeout.connect(self._tick_progress)
+
+        # control buttons
+        row1 = QHBoxLayout()
+        self.restart_btn = QPushButton("RESTART")
+        self.restart_btn.clicked.connect(self._restart_app)
+        self.toggle_btn = QPushButton("START")
+        self.toggle_btn.setCheckable(True)
+        self.toggle_btn.clicked.connect(self._toggle_agent)
+        row1.addWidget(self.restart_btn)
+        row1.addWidget(self.toggle_btn)
+        layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        self.pr_btn = QPushButton("PULL REQUEST")
+        self.pr_btn.clicked.connect(self._open_pr)
+        self.edit_btn = QPushButton("EDIT")
+        self.edit_btn.clicked.connect(self._open_edit)
+        row2.addWidget(self.pr_btn)
+        row2.addWidget(self.edit_btn)
+        layout.addLayout(row2)
+
+        # combined git pull + restart
+        self.pull_restart_btn = QPushButton("GIT PULL + RESTART")
+        self.pull_restart_btn.clicked.connect(self._pull_and_restart)
+        layout.addWidget(self.pull_restart_btn)
+
+        self._agent_running = False
+
+        # Slack bridge: send user messages to the channel and show agent replies
+        self.slack = SlackBridge(self)
+        self.slack.message_received.connect(self._on_slack_message)
+        self.slack.status_changed.connect(lambda s: self._say("slack", s))
+        self.slack.start()
+
+    # ---- chat helpers ----
+    def _say(self, who, text):
+        color = "#2fe6d0" if who == "agent" else "#ff9440"
+        self.chat.append(f'<span style="color:{color}"><b>{who.upper()}:</b></span> {text}')
+
+    def _send(self):
+        text = self.input.text().strip()
+        if not text:
+            return
+        self._say("you", text)
+        self.input.clear()
+        # Post to Slack so the agent (reading the channel) can reply there.
+        ok, info = self.slack.send_user_message(text)
+        if ok:
+            self._say("slack", "→ channel")
+        else:
+            self._say("slack", info)
+            # local stub so the chat still feels alive without Slack
+            QTimer.singleShot(300, lambda: self._say("agent", "Принято. Работаю над этим."))
+
+    def _on_slack_message(self, author, text):
+        self._say("agent", text)
+
+    def closeEvent(self, event):
+        try:
+            self.slack.stop()
+            self.slack.wait(1000)
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    # ---- progress estimation ----
+    def start_progress(self, seconds=30):
+        self._progress_total = max(1, seconds)
+        self._progress_left = self._progress_total
+        self.progress.setValue(0)
+        self._progress_timer.start(1000)
+
+    def _tick_progress(self):
+        self._progress_left = max(0, self._progress_left - 1)
+        done = self._progress_total - self._progress_left
+        self.progress.setValue(int(100 * done / self._progress_total))
+        if self._progress_left <= 0:
+            self._progress_timer.stop()
+            self.progress_label.setText("Agent: done")
+        else:
+            self.progress_label.setText(f"Agent: ~{self._progress_left}s left")
+
+    # ---- actions ----
+    def _restart_app(self):
+        if self.panel is not None:
+            self.panel.restart_app()
+
+    def _toggle_agent(self):
+        self._agent_running = self.toggle_btn.isChecked()
+        self.toggle_btn.setText("STOP" if self._agent_running else "START")
+        if self._agent_running:
+            self._say("agent", "Запущен.")
+            self.start_progress(30)
+        else:
+            self._say("agent", "Остановлен.")
+            self._progress_timer.stop()
+            self.progress_label.setText("Agent: idle")
+            self.progress.setValue(0)
+
+    def _open_pr(self):
+        webbrowser.open("https://github.com/Miike123321/jarvis/pull/1")
+
+    def _open_edit(self):
+        dialog = EditSettingsDialog(self)
+        dialog.exec()
+
+    def _pull_and_restart(self):
+        self._say("agent", "git pull...")
+        try:
+            result = subprocess.run(
+                ["git", "pull"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            out = (result.stdout or result.stderr or "").strip()
+            self._say("agent", out[:300] if out else "git pull: done")
+        except Exception as error:
+            self._say("agent", f"git pull failed: {error}")
+            return
+        self._say("agent", "restarting...")
+        self._restart_app()
+
+
 class CyberPanel(QWidget):
     def __init__(self):
         super().__init__()
-        
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnBottomHint)
-        available_geometry = QApplication.primaryScreen().availableGeometry()
-        self.setGeometry(available_geometry)
-        
-        self.setStyleSheet(
-            """
-            QWidget {
-                color: #d6fff7;
-                background-color: #0b1113;
-                font-family: 'Cascadia Mono', 'DejaVu Sans Mono', monospace;
-            }
-            QLabel#sectionTitle {
-                color: #73f6de;
-                font-size: 11px;
-                font-weight: bold;
-                letter-spacing: 1px;
-                padding: 4px 0;
-            }
-            QLabel#panelTitle {
-                color: #d8fff8;
-                font-size: 18px;
-                font-weight: bold;
-                padding: 2px 0 8px;
-            }
-            QPushButton {
-                color: #bffef1;
-                background-color: #142326;
-                border: 1px solid #286e6b;
-                border-radius: 6px;
-                padding: 7px 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                color: #071112;
-                background-color: #73f6de;
-                border-color: #b8fff4;
-            }
-            QPushButton:pressed { background-color: #42b9ac; }
-            QPlainTextEdit {
-                color: #b8eee4;
-                background-color: #0d1719;
-                border: 1px solid #286e6b;
-                border-radius: 8px;
-                padding: 10px;
-                selection-background-color: #286e6b;
-            }
-            """
-        )
 
-        layout = QHBoxLayout()
-        layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(14)
+        # Live-wallpaper window: frameless, covers the ENTIRE screen (over the
+        # taskbar), pinned to the bottom, and cannot be minimized or dismissed.
+        self.setWindowTitle("JARVIS Panel")
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnBottomHint
+        )
+        screen_geometry = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen_geometry)
+        self.setFixedSize(screen_geometry.width(), screen_geometry.height())
+        self.setStyleSheet(HUD_THEME_STYLESHEET)
+        
+
+        # Scrollable content container so the panel never clips on small screens
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # The global stylesheet gives QScrollArea a border; strip it here so the
+        # panels sit flush with no extra frame.
+        scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        content = QWidget()
+        layout = QHBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # Левая панель метрик
         metrics_panel = QWidget()
-        metrics_panel.setFixedWidth(360)
+        metrics_panel.setMinimumWidth(300)
+        metrics_panel.setMaximumWidth(420)
         metrics_panel.setObjectName("metricsPanel")
         metrics_panel.setStyleSheet(
-            "#metricsPanel { background-color: #0e191b; border: 1px solid #1f4f4e; border-radius: 12px; padding: 8px; }"
+            panel_style("metricsPanel", pad=8)
         )
         metrics_layout = QVBoxLayout(metrics_panel)
         metrics_layout.setContentsMargins(14, 12, 14, 12)
@@ -1113,25 +2019,20 @@ class CyberPanel(QWidget):
         metrics_layout.addLayout(gauges_layout)
 
         self.temp_label = QLabel("CALCULATING...")
-        self.temp_label.setFixedWidth(340)
+        self.temp_label.setMinimumWidth(250)
+        self.temp_label.setMaximumWidth(450)
         self.temp_label.setStyleSheet(
             "color: #73f6de; background-color: #101f21; border: 1px solid #286e6b; "
-            "border-radius: 8px; padding: 12px; font-size: 14px; font-weight: bold;"
+            "border-radius: 8px; padding: 12px; font-size: 18px; font-weight: bold;"
         )
         self.temp_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         metrics_layout.addWidget(self.temp_label)
 
-        self.telegram_label = ClickableLabel("TELEGRAM: STARTING...")
-        self.telegram_label.setFixedSize(340, 260)
-        self.telegram_label.setWordWrap(True)
-        self.telegram_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.telegram_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.telegram_label.setStyleSheet(
-            "color: #bffef1; background-color: #101f21; "
-            "border: 1px solid #286e6b; border-radius: 8px; padding: 12px; font-size: 13px;"
-        )
+        self.telegram_label = TelegramTicker()
         self.telegram_label.clicked.connect(self.open_telegram)
         metrics_layout.addWidget(self.telegram_label)
+        # 6px breathing room below the Telegram ticker
+        metrics_layout.addSpacing(6)
 
         shortcuts_layout = QHBoxLayout()
         shortcuts_layout.setSpacing(8)
@@ -1159,19 +2060,21 @@ class CyberPanel(QWidget):
         shortcuts_layout.addWidget(rdp_button)
 
         for button in (computer_button, chrome_button, rdp_button):
-            button.setFixedSize(106, 52)
+            button.setMinimumSize(64, 52)
+            button.setMaximumSize(120, 60)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             button.setIconSize(QSize(40, 40))
         metrics_layout.addLayout(shortcuts_layout)
-
-        metrics_layout.addStretch()
 
         terminal_title = QLabel("EMBEDDED TERMINAL")
         terminal_title.setObjectName("sectionTitle")
         metrics_layout.addWidget(terminal_title)
 
         self.terminal = EmbeddedTerminal()
-        self.terminal.setFixedSize(340, 300)
-        metrics_layout.addWidget(self.terminal)
+        self.terminal.setMinimumWidth(250)
+        self.terminal.setMaximumWidth(450)
+        self.terminal.setMinimumHeight(110)
+        metrics_layout.addWidget(self.terminal, 1)
 
         terminal_buttons = QHBoxLayout()
         copy_button = QPushButton("COPY ALL")
@@ -1187,11 +2090,14 @@ class CyberPanel(QWidget):
         metrics_layout.addLayout(terminal_buttons)
 
         restart_button = QPushButton("RESTART")
-        restart_button.setFixedWidth(340)
+        restart_button.setMaximumWidth(450)
         restart_button.clicked.connect(self.restart_app)
         metrics_layout.addWidget(restart_button)
+        # Breathing room at the very bottom so content doesn't touch the edge
+        metrics_layout.addSpacing(8)
 
         layout.addWidget(metrics_panel)
+        layout.setStretch(0, 1)
 
         self.telegram_worker = TelegramWorker()
         self.telegram_worker.messages_ready.connect(self.telegram_label.setText)
@@ -1204,9 +2110,17 @@ class CyberPanel(QWidget):
         self.timer.timeout.connect(self.update_hardware_metrics)
         self.timer.start(2000)
 
-        # Create Extended HUD on the right side
-        extended_hud_panel = self.create_extended_hud_panel()
-        layout.addWidget(extended_hud_panel, 1)
+        # Workers that fetch data for the separate ExtendedHUD window.
+        # CyberPanel itself no longer displays this data; the signals are
+        # forwarded to the ExtendedHUD instance in __main__.
+        self.financial_worker = FinancialDataWorker()
+        self.tasks_worker = TasksWorker()
+        self.youtube_worker = YouTubeWorker()
+        self.news_worker = NewsWorker()
+        self.financial_worker.start()
+        self.tasks_worker.start()
+        self.youtube_worker.start()
+        self.news_worker.start()
 
         # Конфигурация персистентного профиля для сохранения сессии авторизации
         self.profile = QWebEngineProfile("CyberProfile")
@@ -1222,20 +2136,31 @@ class CyberPanel(QWidget):
         self.page = QWebEnginePage(self.profile, self.browser)
         self.browser.setPage(self.page)
         self.page.setBackgroundColor(QColor("#101012"))
-        
+
+        self.page.loadFinished.connect(
+            lambda ok: self.hide_superset_header(self.page)
+            if ok and "superset" in self.browser.url().toString() else None
+        )
         self.browser.settings().setAttribute(QWebEngineSettings.WebAttribute.ForceDarkMode, True)
         self.browser.setUrl(QUrl("https://gemini.google.com/"))
-        layout.addWidget(self.browser, 1)
+        layout.addWidget(self.browser)
+        layout.setStretch(1, 4)
 
         right_panel = QWidget()
-        right_panel.setFixedWidth(520)
+        right_panel.setMinimumWidth(420)
+        right_panel.setMaximumWidth(560)
         right_panel.setObjectName("rightPanel")
         right_panel.setStyleSheet(
-            "#rightPanel { background-color: #0e191b; border: 1px solid #1f4f4e; border-radius: 12px; padding: 8px; }"
+            panel_style("rightPanel", pad=8)
         )
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(14, 12, 14, 12)
         right_layout.setSpacing(10)
+
+        sphere = NeonSphereWidget()
+        sphere.setMinimumHeight(150)
+        sphere.setMaximumHeight(190)
+        right_layout.addWidget(sphere)
 
         self.clock_label = QLabel()
         self.clock_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1249,7 +2174,7 @@ class CyberPanel(QWidget):
         self.weather_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.weather_label.setStyleSheet(
             "color: #bffef1; background-color: #101f21; "
-            "border: 1px solid #286e6b; border-radius: 8px; padding: 8px; font-size: 14px;"
+            "border: 1px solid #286e6b; border-radius: 14px; padding: 10px; font-size: 14px;"
         )
         right_layout.addWidget(self.weather_label)
 
@@ -1259,13 +2184,17 @@ class CyberPanel(QWidget):
 
         self.events_view = QPlainTextEdit()
         self.events_view.setReadOnly(True)
-        self.events_view.setFixedHeight(112)
+        self.events_view.setMinimumHeight(112)
         self.events_view.setStyleSheet(
             "color: #b8eee4; background-color: #0d1719; "
-            "border: 1px solid #286e6b; border-radius: 8px; padding: 8px; font-size: 12px;"
+            "border: 1px solid #286e6b; border-radius: 14px; padding: 10px; font-size: 12px;"
         )
         self.events_view.setPlainText("CALENDAR: CONNECTING...")
-        right_layout.addWidget(self.events_view)
+        # stretch=1 so the calendar fills down to the bottom line, level with
+        # the left column's COPY ALL / PASTE / RESTART buttons
+        right_layout.addWidget(self.events_view, 1)
+        # Breathing room at the very bottom so content doesn't touch the edge
+        right_layout.addSpacing(8)
 
         superset_urls = (
             "https://sset.varit.xyz/superset/dashboard/kopiykaanaliticsm/",
@@ -1273,7 +2202,13 @@ class CyberPanel(QWidget):
         )
         self.open_superset_in_chrome(superset_urls[0])
 
-        self.setLayout(layout)
+        layout.addWidget(right_panel)
+        layout.setStretch(2, 1)
+
+        scroll_area.setWidget(content)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll_area)
 
         self.calendar_worker = CalendarWorker()
         self.calendar_worker.events_ready.connect(self.events_view.setPlainText)
@@ -1289,18 +2224,21 @@ class CyberPanel(QWidget):
             ram = psutil.virtual_memory()
             ram_used = ram.used / (1024 ** 3)
             ram_total = ram.total / (1024 ** 3)
-            
-            # Формирование Sci-Fi вывода
-            telemetry = (
-                f"NODE TELEMETRY\n"
-                f"================\n"
-                f"CPU LOAD : {cpu_usage:04.1f}%\n"
-                f"RAM ALLOC: {ram_used:.1f} / {ram_total:.1f} GB\n"
-                f"RAM USAGE: {ram.percent:04.1f}%\n"
-                f"================\n"
-                f"STATE: OPTIMAL"
-            )
-            self.temp_label.setText(telemetry)
+
+            cpu_temp = "N/A"
+            try:
+                for entries in psutil.sensors_temperatures().values():
+                    for entry in entries:
+                        if entry.current:
+                            cpu_temp = f"{entry.current:.0f} C"
+                            break
+                    if cpu_temp != "N/A":
+                        break
+            except (AttributeError, OSError):
+                pass
+
+            # Only a single state line; detailed block removed per request.
+            self.temp_label.setText("STATE: OPTIMAL")
             self.cpu_gauge.value = cpu_usage
             self.cpu_gauge.update()
             self.ram_gauge.value = ram.percent
@@ -1320,10 +2258,11 @@ class CyberPanel(QWidget):
         self.terminal.setFocus()
 
     def open_telegram(self):
-        executable = (
+        executable = os.getenv(
+            "TELEGRAM_EXE_PATH",
             "C:\\Program Files\\WindowsApps\\"
             "TelegramMessengerLLP.TelegramDesktop_7.0.9.0_x64__t4vj0pshhgkwm\\"
-            "Telegram.exe"
+            "Telegram.exe",
         )
         QProcess.startDetached("explorer.exe", [executable])
 
@@ -1331,11 +2270,15 @@ class CyberPanel(QWidget):
         QProcess.startDetached("explorer.exe", ["C:\\"])
 
     def open_chrome(self):
-        executable = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        executable = os.getenv(
+            "CHROME_EXE_PATH", r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        )
         QProcess.startDetached("explorer.exe", [executable])
 
     def open_superset_in_chrome(self, url):
-        executable = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        executable = os.getenv(
+            "CHROME_EXE_PATH", r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        )
         QProcess.startDetached("explorer.exe", [executable, url])
 
     def hide_superset_header(self, page):
@@ -1357,7 +2300,7 @@ class CyberPanel(QWidget):
         )
 
     def open_rdp(self):
-        rdp_file = r"C:\Users\Михаил\OneDrive\Desktop\227.rdp"
+        rdp_file = os.getenv("RDP_FILE_PATH", r"C:\Users\Михаил\OneDrive\Desktop\227.rdp")
         QProcess.startDetached("mstsc.exe", [rdp_file])
 
     def ask_telegram_code(self):
@@ -1395,257 +2338,16 @@ class CyberPanel(QWidget):
         password = dialog.textValue()
         self.telegram_worker.set_password(password if accepted else "")
 
-    def create_extended_hud_panel(self):
-        """Create the Extended HUD panel with tasks, financial data, news, and media"""
-        panel = QWidget()
-        panel.setObjectName("extendedHudPanel")
-        panel.setStyleSheet(
-            "#extendedHudPanel { background-color: #0e191b; border: 1px solid #1f4f4e; border-radius: 12px; padding: 8px; }"
-        )
-        
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(10)
-        
-        # Title
-        hud_title = QLabel("EXTENDED HUD")
-        hud_title.setObjectName("sectionTitle")
-        hud_title.setStyleSheet("color: #73f6de; font-size: 12px; font-weight: bold;")
-        layout.addWidget(hud_title)
-        
-        # Task Management Section
-        task_title = QLabel("SPRINT ИМ")
-        task_title.setObjectName("sectionTitle")
-        layout.addWidget(task_title)
-        
-        self.sprint_list = QListWidget()
-        self.sprint_list.setMaximumHeight(120)
-        self.sprint_list.setStyleSheet(
-            "background-color: #0d1719; border: 1px solid #286e6b; color: #b8eee4; border-radius: 6px;"
-        )
-        layout.addWidget(self.sprint_list)
-        
-        backlog_title = QLabel("ЗАДАЧИ ДЛЯ ЮРЫ")
-        backlog_title.setObjectName("sectionTitle")
-        layout.addWidget(backlog_title)
-        
-        self.backlog_list = QListWidget()
-        self.backlog_list.setMaximumHeight(100)
-        self.backlog_list.setStyleSheet(
-            "background-color: #0d1719; border: 1px solid #286e6b; color: #b8eee4; border-radius: 6px;"
-        )
-        layout.addWidget(self.backlog_list)
-        
-        add_task_btn = QPushButton("+ ДОБАВИТЬ")
-        add_task_btn.setFixedHeight(28)
-        add_task_btn.clicked.connect(self.show_add_task_form)
-        layout.addWidget(add_task_btn)
-        
-        # Task Form
-        self.task_form = QWidget()
-        task_form_layout = QVBoxLayout(self.task_form)
-        task_form_layout.setContentsMargins(0, 0, 0, 0)
-        task_form_layout.setSpacing(4)
-        
-        self.task_name_input = QLineEdit()
-        self.task_name_input.setPlaceholderText("Название...")
-        self.task_name_input.setMaximumHeight(24)
-        self.task_name_input.setStyleSheet(
-            "background-color: #101f21; border: 1px solid #286e6b; color: #b8eee4; border-radius: 4px; padding: 4px;"
-        )
-        task_form_layout.addWidget(self.task_name_input)
-        
-        self.task_desc_input = QLineEdit()
-        self.task_desc_input.setPlaceholderText("Описание...")
-        self.task_desc_input.setMaximumHeight(24)
-        self.task_desc_input.setStyleSheet(
-            "background-color: #101f21; border: 1px solid #286e6b; color: #b8eee4; border-radius: 4px; padding: 4px;"
-        )
-        task_form_layout.addWidget(self.task_desc_input)
-        
-        form_buttons = QHBoxLayout()
-        form_buttons.setSpacing(4)
-        save_btn = QPushButton("СОХР")
-        save_btn.setFixedHeight(24)
-        save_btn.clicked.connect(self.save_task)
-        cancel_btn = QPushButton("ОТМЕН")
-        cancel_btn.setFixedHeight(24)
-        cancel_btn.clicked.connect(self.hide_add_task_form)
-        form_buttons.addWidget(save_btn)
-        form_buttons.addWidget(cancel_btn)
-        task_form_layout.addLayout(form_buttons)
-        
-        self.task_form.hide()
-        layout.addWidget(self.task_form)
-        
-        # Financial Section
-        divider1 = QLabel("─" * 35)
-        divider1.setStyleSheet("color: #286e6b; font-size: 10px;")
-        layout.addWidget(divider1)
-        
-        fin_title = QLabel("FINANCIAL")
-        fin_title.setObjectName("sectionTitle")
-        layout.addWidget(fin_title)
-        
-        fin_layout = QHBoxLayout()
-        fin_layout.setSpacing(4)
-        self.btc_indicator = RadialIndicator("BTC/USDT", 0, 0)
-        self.btc_indicator.setFixedSize(140, 140)
-        self.uah_indicator = RadialIndicator("USD/UAH", 0, 0)
-        self.uah_indicator.setFixedSize(140, 140)
-        fin_layout.addWidget(self.btc_indicator)
-        fin_layout.addWidget(self.uah_indicator)
-        fin_layout.addStretch()
-        layout.addLayout(fin_layout)
-        
-        # Media Section
-        divider2 = QLabel("─" * 35)
-        divider2.setStyleSheet("color: #286e6b; font-size: 10px;")
-        layout.addWidget(divider2)
-        
-        media_title = QLabel("MEDIA")
-        media_title.setObjectName("sectionTitle")
-        layout.addWidget(media_title)
-        
-        self.video_list = QListWidget()
-        self.video_list.setMaximumHeight(80)
-        self.video_list.setStyleSheet(
-            "background-color: #0d1719; border: 1px solid #286e6b; color: #b8eee4; border-radius: 6px;"
-        )
-        self.video_list.itemDoubleClicked.connect(self.play_video)
-        layout.addWidget(self.video_list)
-        
-        # News Section
-        divider3 = QLabel("─" * 35)
-        divider3.setStyleSheet("color: #286e6b; font-size: 10px;")
-        layout.addWidget(divider3)
-        
-        news_title = QLabel("NEWS HUB")
-        news_title.setObjectName("sectionTitle")
-        layout.addWidget(news_title)
-        
-        self.news_carousel = NewsCarousel()
-        self.news_carousel.setFixedHeight(32)
-        layout.addWidget(self.news_carousel)
-        
-        self.news_list = QListWidget()
-        self.news_list.setMaximumHeight(100)
-        self.news_list.setStyleSheet(
-            "background-color: #0d1719; border: 1px solid #286e6b; color: #b8eee4; border-radius: 6px;"
-        )
-        self.news_list.itemClicked.connect(self.open_news)
-        layout.addWidget(self.news_list)
-        
-        layout.addStretch()
-        
-        # Start workers for data updates
-        self.financial_worker = FinancialDataWorker()
-        self.financial_worker.data_updated.connect(self.update_financial_data)
-        # forward financial worker status to events view if available
-        if hasattr(self, 'events_view'):
-            try:
-                self.financial_worker.status_changed.connect(lambda s: self.events_view.setPlainText(s))
-            except Exception:
-                pass
-        self.financial_worker.start()
-        
-        self.tasks_worker = TasksWorker()
-        self.tasks_worker.tasks_updated.connect(self.update_tasks)
-        if hasattr(self, 'events_view'):
-            try:
-                self.tasks_worker.status_changed.connect(lambda s: self.events_view.setPlainText(s))
-            except Exception:
-                pass
-        self.tasks_worker.start()
-        
-        self.youtube_worker = YouTubeWorker()
-        self.youtube_worker.videos_updated.connect(self.update_videos)
-        try:
-            self.youtube_worker.status_changed.connect(lambda s: (self.video_list.clear(), self.video_list.addItem(f"ERROR: {s}")))
-        except Exception:
-            pass
-        self.youtube_worker.start()
-        
-        self.news_worker = NewsWorker()
-        self.news_worker.news_updated.connect(self.update_news)
-        try:
-            self.news_worker.status_changed.connect(lambda s: (self.news_list.clear(), self.news_list.addItem(f"ERROR: {s}")))
-        except Exception:
-            pass
-        self.news_worker.start()
-        
-        return panel
 
-    def update_financial_data(self, data):
-        self.btc_indicator.value = data.get("btc_price", 0)
-        self.btc_indicator.change = data.get("btc_change", 0)
-        self.btc_indicator.update()
-        
-        self.uah_indicator.value = data.get("uah_rate", 0)
-        self.uah_indicator.update()
-
-    def update_tasks(self, sprint_tasks, backlog_tasks):
-        self.sprint_list.clear()
-        for task in sprint_tasks[:5]:
-            if len(task) >= 2:
-                item_text = f"{task[0]} ({task[1]})" if len(task) > 1 else task[0]
-                item = QListWidgetItem(item_text[:50])
-                self.sprint_list.addItem(item)
-        
-        self.backlog_list.clear()
-        for task in backlog_tasks[:5]:
-            if len(task) >= 1:
-                item_text = task[0]
-                item = QListWidgetItem(item_text[:50])
-                self.backlog_list.addItem(item)
-
-    def update_videos(self, videos):
-        self.video_list.clear()
-        if not videos:
-            self.video_list.addItem("NO VIDEOS — check YOUTUBE_API_KEY or network")
-            return
-        for title, video_id, thumbnail in videos:
-            item = QListWidgetItem(title[:40])
-            item.setData(Qt.ItemDataRole.UserRole, video_id)
-            self.video_list.addItem(item)
-
-    def play_video(self, item):
-        video_id = item.data(Qt.ItemDataRole.UserRole)
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        webbrowser.open(url)
-
-    def update_news(self, news_items):
-        self.news_carousel.set_news(news_items)
-        
-        self.news_list.clear()
-        if not news_items:
-            self.news_list.addItem("NO NEWS AVAILABLE")
-            return
-        for title, link, source in news_items:
-            item = QListWidgetItem(f"[{source}] {title[:35]}")
-            item.setData(Qt.ItemDataRole.UserRole, link)
-            self.news_list.addItem(item)
-
-    def open_news(self, item):
-        link = item.data(Qt.ItemDataRole.UserRole)
-        webbrowser.open(link)
-
-    def show_add_task_form(self):
-        self.task_form.show()
-        self.task_name_input.setFocus()
-
-    def hide_add_task_form(self):
-        self.task_form.hide()
-        self.task_name_input.clear()
-        self.task_desc_input.clear()
-
-    def save_task(self):
-        name = self.task_name_input.text()
-        desc = self.task_desc_input.text()
-        if name:
-            item = QListWidgetItem(f"{name[:30]} - {desc[:15]}")
-            self.backlog_list.addItem(item)
-            self.hide_add_task_form()
+    def changeEvent(self, event):
+        # Wallpaper must never be minimized: if a minimize slips through
+        # (e.g. Win+D / Win+M), immediately restore to normal.
+        if (
+            event.type() == QEvent.Type.WindowStateChange
+            and self.isMinimized()
+        ):
+            QTimer.singleShot(0, self.showNormal)
+        super().changeEvent(event)
 
     def closeEvent(self, event):
         self.telegram_worker.stop()
@@ -1653,6 +2355,9 @@ class CyberPanel(QWidget):
         self.calendar_worker.stop()
         self.calendar_worker.wait(3000)
         self.terminal.stop()
+
+        if hasattr(self, 'extended_hud_window'):
+            self.extended_hud_window.close()
         
         # Stop Extended HUD workers
         if hasattr(self, 'financial_worker'):
@@ -1673,6 +2378,12 @@ class CyberPanel(QWidget):
 if __name__ == '__main__':
     app = QApplication(sys.argv)
 
+    # One-time setup: show the form while any required key is missing
+    if missing_env_keys():
+        setup_dialog = FirstRunSetupDialog()
+        setup_dialog.exec()
+        load_dotenv(ENV_PATH, override=True)
+
     startup = QWidget()
     startup.setWindowFlags(Qt.WindowType.SplashScreen | Qt.WindowType.WindowStaysOnTopHint)
     startup.setFixedSize(520, 220)
@@ -1692,7 +2403,30 @@ if __name__ == '__main__':
     app.processEvents()
 
     panel = CyberPanel()
-    panel.show()
+    panel.showFullScreen()
+
+    # Second-monitor HUD window, fed by CyberPanel's data workers
+    extended_hud = ExtendedHUD()
+    panel.financial_worker.data_updated.connect(extended_hud.update_financial_data)
+    panel.tasks_worker.tasks_updated.connect(extended_hud.update_tasks)
+    panel.youtube_worker.videos_updated.connect(extended_hud.update_videos)
+    panel.youtube_worker.status_changed.connect(extended_hud.update_video_status)
+    panel.news_worker.news_updated.connect(extended_hud.update_news)
+    panel.extended_hud_window = extended_hud
+    extended_hud.showFullScreen()
+
+    # Small agent-chat window on the second monitor (or beside the panel)
+    agent_chat = AgentChat(panel=panel)
+    screens = QApplication.screens()
+    if len(screens) > 1:
+        geo = screens[1].geometry()
+        agent_chat.move(geo.x() + geo.width() - agent_chat.width() - 24, geo.y() + 24)
+    else:
+        geo = QApplication.primaryScreen().geometry()
+        agent_chat.move(geo.x() + geo.width() - agent_chat.width() - 24, geo.y() + 24)
+    agent_chat.show()
+    panel.agent_chat_window = agent_chat
+
     startup.raise_()
     QTimer.singleShot(1800, startup.close)
     sys.exit(app.exec())
