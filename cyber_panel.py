@@ -95,6 +95,8 @@ SETUP_FIELDS = [
     ("TELEGRAM_EXE_PATH", "Telegram.exe path", True),
     ("CHROME_EXE_PATH", "chrome.exe path", True),
     ("RDP_FILE_PATH", "RDP file path", True),
+    ("SLACK_BOT_TOKEN", "Slack Bot Token (xoxb-...)", True),
+    ("SLACK_CHANNEL_ID", "Slack Channel ID (C...)", True),
 ]
 
 REQUIRED_ENV_KEYS = [key for key, _, optional in SETUP_FIELDS if not optional]
@@ -1615,6 +1617,155 @@ class ExtendedHUD(HudDataMixin, QWidget):
         event.accept()
 
 
+class EditSettingsDialog(QDialog):
+    """Edit API keys / module settings at runtime (saved to ~/.env)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("JARVIS — Edit Settings")
+        self.setMinimumWidth(520)
+        self.setStyleSheet(
+            """
+            QWidget { color: #d6fff7; background-color: #0b1113;
+                font-family: 'Cascadia Mono', 'DejaVu Sans Mono', monospace; }
+            QLineEdit { background-color: #101f21; border: 1px solid #286e6b;
+                color: #b8eee4; padding: 6px; border-radius: 6px; }
+            QPushButton { color: #bffef1; background-color: #142326;
+                border: 1px solid #286e6b; border-radius: 8px;
+                padding: 7px 12px; font-weight: bold; }
+            QPushButton:hover { color: #071112; background-color: #73f6de; }
+            """
+        )
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+
+        header = QLabel("EDIT SETTINGS\nChanges are saved to ~/.env and applied on next restart.")
+        header.setStyleSheet("color: #73f6de; font-size: 12px; font-weight: bold;")
+        layout.addWidget(header)
+
+        self.inputs = {}
+        for key, label, optional in SETUP_FIELDS:
+            field_label = QLabel(f"{label}{' (optional)' if optional else ''}")
+            field_label.setStyleSheet("color: #9effef; font-size: 11px;")
+            layout.addWidget(field_label)
+            input_field = QLineEdit()
+            input_field.setText(os.getenv(key, ""))
+            self.inputs[key] = input_field
+            layout.addWidget(input_field)
+
+        buttons = QHBoxLayout()
+        save_button = QPushButton("SAVE")
+        save_button.clicked.connect(self._save)
+        cancel_button = QPushButton("CANCEL")
+        cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(save_button)
+        buttons.addWidget(cancel_button)
+        layout.addLayout(buttons)
+
+    def _save(self):
+        save_env_values({key: field.text().strip() for key, field in self.inputs.items()})
+        load_dotenv(ENV_PATH, override=True)
+        self.accept()
+
+
+class SlackBridge(QThread):
+    """Bridge between the AgentChat window and a Slack channel.
+
+    Outgoing: send_user_message() posts the user's text to the channel.
+    Incoming: run() polls the channel history and emits messages from others
+    (i.e. the agent's replies) so the chat window can show them.
+    Requires SLACK_BOT_TOKEN + SLACK_CHANNEL_ID in .env.
+    """
+
+    message_received = pyqtSignal(str, str)  # (author, text)
+    status_changed = pyqtSignal(str)
+
+    API = "https://slack.com/api"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.token = os.getenv("SLACK_BOT_TOKEN", "")
+        self.channel = os.getenv("SLACK_CHANNEL_ID", "")
+        self.running = True
+        self._last_ts = None
+        self._bot_user_id = None
+
+    def stop(self):
+        self.running = False
+
+    def configured(self):
+        return bool(self.token and self.channel)
+
+    def _headers(self):
+        return {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
+
+    def _post(self, method, payload):
+        response = requests.post(
+            f"{self.API}/{method}", headers=self._headers(), json=payload, timeout=10
+        )
+        return response.json()
+
+    def send_user_message(self, text):
+        """Post a user message into the channel. Returns (ok, info)."""
+        if not self.configured():
+            return False, "Slack not configured (set SLACK_BOT_TOKEN + SLACK_CHANNEL_ID)"
+        try:
+            data = self._post("chat.postMessage", {"channel": self.channel, "text": text})
+            if data.get("ok"):
+                self._last_ts = data.get("ts", self._last_ts)
+                return True, "sent"
+            return False, data.get("error", "unknown error")
+        except Exception as error:
+            return False, str(error)
+
+    def run(self):
+        if not self.configured():
+            self.status_changed.emit("SLACK: NOT CONFIGURED")
+            return
+        # find our own bot user id so we don't echo our own posts
+        try:
+            auth = self._post("auth.test", {})
+            self._bot_user_id = auth.get("user_id")
+        except Exception:
+            self._bot_user_id = None
+        self.status_changed.emit("SLACK: CONNECTED")
+        while self.running:
+            try:
+                params = {"channel": self.channel, "limit": 20}
+                if self._last_ts:
+                    params["oldest"] = self._last_ts
+                data = requests.get(
+                    f"{self.API}/conversations.history",
+                    headers=self._headers(),
+                    params=params,
+                    timeout=10,
+                ).json()
+                if data.get("ok"):
+                    messages = data.get("messages", [])
+                    # history returns newest first; replay oldest first
+                    for msg in reversed(messages):
+                        ts = msg.get("ts")
+                        if self._last_ts and ts <= self._last_ts:
+                            continue
+                        if msg.get("user") == self._bot_user_id:
+                            continue
+                        subtype = msg.get("subtype")
+                        if subtype in ("channel_join", "channel_leave"):
+                            continue
+                        author = msg.get("user") or msg.get("bot_id") or "agent"
+                        self.message_received.emit(author, msg.get("text", ""))
+                    if messages:
+                        self._last_ts = messages[0].get("ts", self._last_ts)
+                else:
+                    self.status_changed.emit(f"SLACK: {data.get('error', 'error')}")
+            except Exception as error:
+                self.status_changed.emit(f"SLACK: {error}")
+            for _ in range(4):
+                if not self.running:
+                    return
+                threading.Event().wait(1)
+
+
 class AgentChat(QWidget):
     """Small 'chat with the agent' window for the second monitor.
 
@@ -1690,7 +1841,10 @@ class AgentChat(QWidget):
         row2 = QHBoxLayout()
         self.pr_btn = QPushButton("PULL REQUEST")
         self.pr_btn.clicked.connect(self._open_pr)
+        self.edit_btn = QPushButton("EDIT")
+        self.edit_btn.clicked.connect(self._open_edit)
         row2.addWidget(self.pr_btn)
+        row2.addWidget(self.edit_btn)
         layout.addLayout(row2)
 
         # combined git pull + restart
@@ -1699,6 +1853,12 @@ class AgentChat(QWidget):
         layout.addWidget(self.pull_restart_btn)
 
         self._agent_running = False
+
+        # Slack bridge: send user messages to the channel and show agent replies
+        self.slack = SlackBridge(self)
+        self.slack.message_received.connect(self._on_slack_message)
+        self.slack.status_changed.connect(lambda s: self._say("slack", s))
+        self.slack.start()
 
     # ---- chat helpers ----
     def _say(self, who, text):
@@ -1711,8 +1871,25 @@ class AgentChat(QWidget):
             return
         self._say("you", text)
         self.input.clear()
-        # echo back a stub reply; the real agent lives outside this app
-        QTimer.singleShot(300, lambda: self._say("agent", "Принято. Работаю над этим."))
+        # Post to Slack so the agent (reading the channel) can reply there.
+        ok, info = self.slack.send_user_message(text)
+        if ok:
+            self._say("slack", "→ channel")
+        else:
+            self._say("slack", info)
+            # local stub so the chat still feels alive without Slack
+            QTimer.singleShot(300, lambda: self._say("agent", "Принято. Работаю над этим."))
+
+    def _on_slack_message(self, author, text):
+        self._say("agent", text)
+
+    def closeEvent(self, event):
+        try:
+            self.slack.stop()
+            self.slack.wait(1000)
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     # ---- progress estimation ----
     def start_progress(self, seconds=30):
@@ -1750,6 +1927,10 @@ class AgentChat(QWidget):
 
     def _open_pr(self):
         webbrowser.open("https://github.com/Miike123321/jarvis/pull/1")
+
+    def _open_edit(self):
+        dialog = EditSettingsDialog(self)
+        dialog.exec()
 
     def _pull_and_restart(self):
         self._say("agent", "git pull...")
