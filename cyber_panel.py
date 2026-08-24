@@ -26,7 +26,9 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPushButton,
     QPlainTextEdit,
+    QTextEdit,
     QLineEdit,
+    QProgressBar,
     QInputDialog,
     QDialog,
     QStyle,
@@ -1613,6 +1615,161 @@ class ExtendedHUD(HudDataMixin, QWidget):
         event.accept()
 
 
+class AgentChat(QWidget):
+    """Small 'chat with the agent' window for the second monitor.
+
+    Buttons: Restart app, Start/Stop the agent loop, open the Pull Request,
+    and one combined button that runs `git pull` then restarts the app.
+    A progress bar estimates how long the current agent task has left.
+    """
+
+    def __init__(self, panel=None, parent=None):
+        super().__init__(parent)
+        self.panel = panel
+        self.setWindowTitle("JARVIS — Agent Chat")
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setFixedSize(340, 460)
+        self.setStyleSheet(HUD_THEME_STYLESHEET)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        title = QLabel("AGENT CHAT")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        # chat log
+        self.chat = QTextEdit()
+        self.chat.setReadOnly(True)
+        self.chat.setStyleSheet(
+            "background-color: #0d1719; border: 1px solid #286e6b; "
+            "border-radius: 10px; padding: 8px; font-size: 12px; color: #a9e6dd;"
+        )
+        layout.addWidget(self.chat, 1)
+        self._say("agent", "Слушаю, сэр. Чем помочь?")
+
+        # input row
+        input_row = QHBoxLayout()
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("Напишите сообщение...")
+        self.input.returnPressed.connect(self._send)
+        send_btn = QPushButton("➤")
+        send_btn.setFixedWidth(40)
+        send_btn.clicked.connect(self._send)
+        input_row.addWidget(self.input, 1)
+        input_row.addWidget(send_btn)
+        layout.addLayout(input_row)
+
+        # progress: estimated time remaining for the current agent task
+        self.progress_label = QLabel("Agent: idle")
+        self.progress_label.setStyleSheet("color: #5fb8ac; font-size: 11px;")
+        layout.addWidget(self.progress_label)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        layout.addWidget(self.progress)
+        self._progress_timer = QTimer(self)
+        self._progress_timer.timeout.connect(self._tick_progress)
+
+        # control buttons
+        row1 = QHBoxLayout()
+        self.restart_btn = QPushButton("RESTART")
+        self.restart_btn.clicked.connect(self._restart_app)
+        self.toggle_btn = QPushButton("START")
+        self.toggle_btn.setCheckable(True)
+        self.toggle_btn.clicked.connect(self._toggle_agent)
+        row1.addWidget(self.restart_btn)
+        row1.addWidget(self.toggle_btn)
+        layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        self.pr_btn = QPushButton("PULL REQUEST")
+        self.pr_btn.clicked.connect(self._open_pr)
+        row2.addWidget(self.pr_btn)
+        layout.addLayout(row2)
+
+        # combined git pull + restart
+        self.pull_restart_btn = QPushButton("GIT PULL + RESTART")
+        self.pull_restart_btn.clicked.connect(self._pull_and_restart)
+        layout.addWidget(self.pull_restart_btn)
+
+        self._agent_running = False
+
+    # ---- chat helpers ----
+    def _say(self, who, text):
+        color = "#2fe6d0" if who == "agent" else "#ff9440"
+        self.chat.append(f'<span style="color:{color}"><b>{who.upper()}:</b></span> {text}')
+
+    def _send(self):
+        text = self.input.text().strip()
+        if not text:
+            return
+        self._say("you", text)
+        self.input.clear()
+        # echo back a stub reply; the real agent lives outside this app
+        QTimer.singleShot(300, lambda: self._say("agent", "Принято. Работаю над этим."))
+
+    # ---- progress estimation ----
+    def start_progress(self, seconds=30):
+        self._progress_total = max(1, seconds)
+        self._progress_left = self._progress_total
+        self.progress.setValue(0)
+        self._progress_timer.start(1000)
+
+    def _tick_progress(self):
+        self._progress_left = max(0, self._progress_left - 1)
+        done = self._progress_total - self._progress_left
+        self.progress.setValue(int(100 * done / self._progress_total))
+        if self._progress_left <= 0:
+            self._progress_timer.stop()
+            self.progress_label.setText("Agent: done")
+        else:
+            self.progress_label.setText(f"Agent: ~{self._progress_left}s left")
+
+    # ---- actions ----
+    def _restart_app(self):
+        if self.panel is not None:
+            self.panel.restart_app()
+
+    def _toggle_agent(self):
+        self._agent_running = self.toggle_btn.isChecked()
+        self.toggle_btn.setText("STOP" if self._agent_running else "START")
+        if self._agent_running:
+            self._say("agent", "Запущен.")
+            self.start_progress(30)
+        else:
+            self._say("agent", "Остановлен.")
+            self._progress_timer.stop()
+            self.progress_label.setText("Agent: idle")
+            self.progress.setValue(0)
+
+    def _open_pr(self):
+        webbrowser.open("https://github.com/Miike123321/jarvis/pull/1")
+
+    def _pull_and_restart(self):
+        self._say("agent", "git pull...")
+        try:
+            result = subprocess.run(
+                ["git", "pull"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            out = (result.stdout or result.stderr or "").strip()
+            self._say("agent", out[:300] if out else "git pull: done")
+        except Exception as error:
+            self._say("agent", f"git pull failed: {error}")
+            return
+        self._say("agent", "restarting...")
+        self._restart_app()
+
+
 class CyberPanel(QWidget):
     def __init__(self):
         super().__init__()
@@ -2065,6 +2222,18 @@ if __name__ == '__main__':
     panel.news_worker.news_updated.connect(extended_hud.update_news)
     panel.extended_hud_window = extended_hud
     extended_hud.showFullScreen()
+
+    # Small agent-chat window on the second monitor (or beside the panel)
+    agent_chat = AgentChat(panel=panel)
+    screens = QApplication.screens()
+    if len(screens) > 1:
+        geo = screens[1].geometry()
+        agent_chat.move(geo.x() + geo.width() - agent_chat.width() - 24, geo.y() + 24)
+    else:
+        geo = QApplication.primaryScreen().geometry()
+        agent_chat.move(geo.x() + geo.width() - agent_chat.width() - 24, geo.y() + 24)
+    agent_chat.show()
+    panel.agent_chat_window = agent_chat
 
     startup.raise_()
     QTimer.singleShot(1800, startup.close)
