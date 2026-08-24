@@ -1636,6 +1636,9 @@ class CyberPanel(QWidget):
         scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # The global stylesheet gives QScrollArea a border; strip it here so the
+        # panels sit flush with no extra frame.
+        scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
 
         content = QWidget()
         layout = QHBoxLayout(content)
@@ -1743,6 +1746,8 @@ class CyberPanel(QWidget):
         restart_button.setMaximumWidth(450)
         restart_button.clicked.connect(self.restart_app)
         metrics_layout.addWidget(restart_button)
+        # Breathing room at the very bottom so content doesn't touch the edge
+        metrics_layout.addSpacing(8)
 
         layout.addWidget(metrics_panel)
         layout.setStretch(0, 1)
@@ -1839,6 +1844,8 @@ class CyberPanel(QWidget):
         )
         self.events_view.setPlainText("CALENDAR: CONNECTING...")
         right_layout.addWidget(self.events_view)
+        # Breathing room at the very bottom so content doesn't touch the edge
+        right_layout.addSpacing(8)
 
         superset_urls = (
             "https://sset.varit.xyz/superset/dashboard/kopiykaanaliticsm/",
