@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QFileDialog,
     QFrame,
+    QSizePolicy,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
@@ -1649,8 +1650,8 @@ class CyberPanel(QWidget):
 
         content = QWidget()
         layout = QHBoxLayout(content)
-        layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(14)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # Левая панель метрик
         metrics_panel = QWidget()
@@ -1677,25 +1678,27 @@ class CyberPanel(QWidget):
         metrics_layout.addLayout(gauges_layout)
 
         self.temp_label = QLabel("CALCULATING...")
-        self.temp_label.setFixedWidth(340)
+        self.temp_label.setMinimumWidth(250)
+        self.temp_label.setMaximumWidth(450)
         self.temp_label.setStyleSheet(
             "color: #73f6de; background-color: #101f21; border: 1px solid #286e6b; "
-            "border-radius: 8px; padding: 12px; font-size: 14px; font-weight: bold;"
+            "border-radius: 8px; padding: 12px; font-size: 18px; font-weight: bold;"
         )
         self.temp_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         metrics_layout.addWidget(self.temp_label)
 
         self.telegram_label = ClickableLabel("TELEGRAM: STARTING...")
-        self.telegram_label.setFixedSize(340, 260)
+        self.telegram_label.setMinimumWidth(250)
+        self.telegram_label.setMaximumWidth(450)
         self.telegram_label.setWordWrap(True)
         self.telegram_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.telegram_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.telegram_label.setStyleSheet(
             "color: #bffef1; background-color: #101f21; "
-            "border: 1px solid #286e6b; border-radius: 8px; padding: 12px; font-size: 13px;"
+            "border: 1px solid #286e6b; border-radius: 8px; padding: 12px; font-size: 12px;"
         )
         self.telegram_label.clicked.connect(self.open_telegram)
-        metrics_layout.addWidget(self.telegram_label)
+        metrics_layout.addWidget(self.telegram_label, 1)
 
         shortcuts_layout = QHBoxLayout()
         shortcuts_layout.setSpacing(8)
@@ -1723,7 +1726,9 @@ class CyberPanel(QWidget):
         shortcuts_layout.addWidget(rdp_button)
 
         for button in (computer_button, chrome_button, rdp_button):
-            button.setFixedSize(106, 52)
+            button.setMinimumSize(64, 52)
+            button.setMaximumSize(120, 60)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             button.setIconSize(QSize(40, 40))
         metrics_layout.addLayout(shortcuts_layout)
 
@@ -1734,8 +1739,10 @@ class CyberPanel(QWidget):
         metrics_layout.addWidget(terminal_title)
 
         self.terminal = EmbeddedTerminal()
-        self.terminal.setFixedSize(340, 300)
-        metrics_layout.addWidget(self.terminal)
+        self.terminal.setMinimumWidth(250)
+        self.terminal.setMaximumWidth(450)
+        self.terminal.setMinimumHeight(180)
+        metrics_layout.addWidget(self.terminal, 1)
 
         terminal_buttons = QHBoxLayout()
         copy_button = QPushButton("COPY ALL")
@@ -1751,11 +1758,12 @@ class CyberPanel(QWidget):
         metrics_layout.addLayout(terminal_buttons)
 
         restart_button = QPushButton("RESTART")
-        restart_button.setFixedWidth(340)
+        restart_button.setMaximumWidth(450)
         restart_button.clicked.connect(self.restart_app)
         metrics_layout.addWidget(restart_button)
 
-        layout.addWidget(metrics_panel, 0)
+        layout.addWidget(metrics_panel)
+        layout.setStretch(0, 1)
 
         self.telegram_worker = TelegramWorker()
         self.telegram_worker.messages_ready.connect(self.telegram_label.setText)
@@ -1801,7 +1809,8 @@ class CyberPanel(QWidget):
         )
         self.browser.settings().setAttribute(QWebEngineSettings.WebAttribute.ForceDarkMode, True)
         self.browser.setUrl(QUrl("https://gemini.google.com/"))
-        layout.addWidget(self.browser, 1)
+        layout.addWidget(self.browser)
+        layout.setStretch(1, 4)
 
         right_panel = QWidget()
         right_panel.setMinimumWidth(420)
@@ -1855,7 +1864,8 @@ class CyberPanel(QWidget):
         )
         self.open_superset_in_chrome(superset_urls[0])
 
-        layout.addWidget(right_panel, 0)
+        layout.addWidget(right_panel)
+        layout.setStretch(2, 1)
 
         scroll_area.setWidget(content)
         outer = QVBoxLayout(self)
