@@ -1835,13 +1835,15 @@ class CyberPanel(QWidget):
 
         self.events_view = QPlainTextEdit()
         self.events_view.setReadOnly(True)
-        self.events_view.setFixedHeight(112)
+        self.events_view.setMinimumHeight(112)
         self.events_view.setStyleSheet(
             "color: #b8eee4; background-color: #0d1719; "
             "border: 1px solid #286e6b; border-radius: 8px; padding: 8px; font-size: 12px;"
         )
         self.events_view.setPlainText("CALENDAR: CONNECTING...")
-        right_layout.addWidget(self.events_view)
+        # stretch=1 so the calendar fills down to the bottom line, level with
+        # the left column's COPY ALL / PASTE / RESTART buttons
+        right_layout.addWidget(self.events_view, 1)
         # Breathing room at the very bottom so content doesn't touch the edge
         right_layout.addSpacing(8)
 
