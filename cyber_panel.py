@@ -1888,18 +1888,8 @@ class CyberPanel(QWidget):
             except (AttributeError, OSError):
                 pass
 
-            # Формирование Sci-Fi вывода
-            telemetry = (
-                f"NODE TELEMETRY\n"
-                f"================\n"
-                f"CPU LOAD : {cpu_usage:04.1f}%\n"
-                f"CPU TEMP : {cpu_temp}\n"
-                f"RAM ALLOC: {ram_used:.1f} / {ram_total:.1f} GB\n"
-                f"RAM USAGE: {ram.percent:04.1f}%\n"
-                f"================\n"
-                f"STATE: OPTIMAL"
-            )
-            self.temp_label.setText(telemetry)
+            # Only a single state line; detailed block removed per request.
+            self.temp_label.setText("STATE: OPTIMAL")
             self.cpu_gauge.value = cpu_usage
             self.cpu_gauge.update()
             self.ram_gauge.value = ram.percent
