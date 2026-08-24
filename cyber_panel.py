@@ -39,22 +39,6 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
-# OpenGL is optional: if PyOpenGL is missing or the driver/context is
-# unavailable, the sphere falls back to a pure-QPainter software render.
-try:
-    from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-    from PyQt6.QtGui import QSurfaceFormat
-    from OpenGL.GL import (
-        glClear, glClearColor, glColor4f, glPointSize, glBegin, glEnd, glVertex3f,
-        glMatrixMode, glLoadIdentity, glRotatef, glTranslatef, glEnable, glBlendFunc,
-        GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_PROJECTION, GL_MODELVIEW,
-        GL_POINTS, GL_BLEND, GL_SRC_ALPHA, GL_ONE, glLoadMatrixf,
-    )
-    _GL_AVAILABLE = True
-except Exception:
-    QOpenGLWidget = None
-    QSurfaceFormat = None
-    _GL_AVAILABLE = False
 from PyQt6.QtGui import QIcon, QPixmap, QColor, QPainter, QPen, QFont, QPolygon
 from PyQt6.QtCore import Qt, QUrl, QTimer, QThread, QProcess, QProcessEnvironment, QSize, pyqtSignal, QPoint, QRect
 from telethon import TelegramClient
@@ -1130,69 +1114,12 @@ class SoftwareSphereWidget(_SphereBase):
         painter.end()
 
 
-if _GL_AVAILABLE:
-    class GLSphereWidget(QOpenGLWidget, _SphereBase):
-        """Hardware-accelerated particle globe (preferred when GL is present)."""
-
-        def __init__(self, parent=None, points=420):
-            fmt = QSurfaceFormat()
-            fmt.setSamples(4)
-            QSurfaceFormat.setDefaultFormat(fmt)
-            QOpenGLWidget.__init__(self, parent)
-            _SphereBase.__init__(self, parent, points)
-
-        def initializeGL(self):
-            glClearColor(0.039, 0.051, 0.063, 1.0)  # match NEON_BACKGROUND
-            glEnable(GL_BLEND)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-
-        def resizeGL(self, w, h):
-            glMatrixMode(GL_PROJECTION)
-            glLoadIdentity()
-            aspect = (w / h) if h else 1.0
-            f = 1.0 / math.tan(math.radians(45.0) / 2.0)
-            near, far = 0.1, 100.0
-            m = [0.0] * 16
-            m[0] = f / aspect
-            m[5] = f
-            m[10] = (far + near) / (near - far)
-            m[11] = -1.0
-            m[14] = (2.0 * far * near) / (near - far)
-            glLoadMatrixf(m)
-            glMatrixMode(GL_MODELVIEW)
-
-        def paintGL(self):
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-            glLoadIdentity()
-            glTranslatef(0.0, 0.0, -2.6)
-            glRotatef(self.angle, 0.0, 1.0, 0.0)
-            glRotatef(18.0, 1.0, 0.0, 0.0)
-
-            cyan = self._rgba(ACCENT_CYAN)
-            orange = self._rgba(ACCENT_ORANGE)
-            # two passes: soft glow then bright core
-            for size, alpha in ((7.0, 0.18), (3.0, 0.9)):
-                glPointSize(size)
-                glBegin(GL_POINTS)
-                for i, (x, y, z) in enumerate(self._pts):
-                    base = cyan if (i % 11) else orange
-                    # fade points on the far side for depth
-                    depth = (z + 1.0) * 0.5
-                    a = alpha * (0.25 + 0.75 * depth)
-                    glColor4f(base[0], base[1], base[2], a)
-                    glVertex3f(x, y, z)
-                glEnd()
-else:
-    GLSphereWidget = None
-
-
+# The globe is always rendered in software (QPainter). A QOpenGLWidget would
+# conflict with QtWebEngine's window compositor on Windows (D3D11), spamming
+# "'D3D11' is not compatible with QOpenGLWidget" and failing to render, so we
+# deliberately avoid GL here. The software globe looks identical.
 def NeonSphereWidget(parent=None, points=420):
-    """Return the best available sphere: GL when possible, else software."""
-    if _GL_AVAILABLE and GLSphereWidget is not None:
-        try:
-            return GLSphereWidget(parent, points)
-        except Exception:
-            pass
+    """Return the neon particle globe (software-rendered)."""
     return SoftwareSphereWidget(parent, points)
 
 
