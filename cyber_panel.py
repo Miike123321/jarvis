@@ -575,7 +575,7 @@ class YouTubeWorker(QThread):
                 
                 self.videos_updated.emit(videos)
             except Exception as e:
-                self.status_changed.emit(f"YOUTUBE: {str(e)[:50]}")
+                self.status_changed.emit(f"YOUTUBE: {str(e)[:200]}")
             
             for _ in range(120):
                 if not self.running:
@@ -1279,6 +1279,11 @@ class HudDataMixin:
         for task in backlog_tasks[:self.hud_task_limit]:
             if len(task) >= 1:
                 backlog_list.addItem(QListWidgetItem(task[0][:self.hud_item_max_len]))
+
+    def update_video_status(self, status):
+        video_list = self._hud_attr("video_list")
+        video_list.clear()
+        video_list.addItem(status)
 
     def update_videos(self, videos):
         video_list = self._hud_attr("video_list")
@@ -2015,6 +2020,7 @@ if __name__ == '__main__':
     panel.financial_worker.data_updated.connect(extended_hud.update_financial_data)
     panel.tasks_worker.tasks_updated.connect(extended_hud.update_tasks)
     panel.youtube_worker.videos_updated.connect(extended_hud.update_videos)
+    panel.youtube_worker.status_changed.connect(extended_hud.update_video_status)
     panel.news_worker.news_updated.connect(extended_hud.update_news)
     panel.extended_hud_window = extended_hud
     extended_hud.showFullScreen()
