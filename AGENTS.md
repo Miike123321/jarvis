@@ -24,6 +24,11 @@ Work happens on branch `feature/first-run-setup-and-missing-pieces` (PR #1).
 - Python deps in `requirements.txt` (includes `PyOpenGL` for the globe).
 
 ## Verifying renders in THIS environment (hard-won)
+- **The sandbox resets between sessions** — PyQt6, xvfb, and the X/GL system libs
+  may ALL vanish. If `xvfb-run`/`PyQt6`/`libEGL` are missing, re-run the installs below.
+  Reinstall python deps: `pip install PyQt6 PyQt6-WebEngine psutil requests
+  beautifulsoup4 python-dotenv telethon google-auth google-auth-oauthlib
+  google-api-python-client` (and `PyOpenGL` for the GL globe path).
 - PyQt6 periodically gets dropped → `pip install` it again if `ModuleNotFoundError`.
 - **Offscreen (no GL):** `QT_QPA_PLATFORM=offscreen`. Works for QWidget painting
   (gauges, cards, ring) but NOT for QOpenGLWidget (GL context invalid / grabFramebuffer fails).
