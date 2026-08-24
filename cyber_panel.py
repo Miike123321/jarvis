@@ -781,11 +781,11 @@ class TelegramWorker(QThread):
 
                 messages.sort(key=lambda item: item[0], reverse=True)
                 if messages:
-                    # Show only the first line of each of the last 5 messages,
-                    # so the Telegram block stays compact and the panel keeps
-                    # a stable size.
+                    # Show only up to the first line break or 26 characters of
+                    # each of the last 5 messages, so the Telegram block stays
+                    # compact and the panel keeps a stable size.
                     output = "\n".join(
-                        f"{name}: {text.splitlines()[0][:100] if text.strip() else ''}"
+                        f"{name}: {text.splitlines()[0][:26] if text.strip() else ''}"
                         for _, name, text in messages[:5]
                     )
                     self.messages_ready.emit(output)
