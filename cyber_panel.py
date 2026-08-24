@@ -40,7 +40,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
 from PyQt6.QtGui import QIcon, QPixmap, QColor, QPainter, QPen, QFont, QPolygon
-from PyQt6.QtCore import Qt, QUrl, QTimer, QThread, QProcess, QProcessEnvironment, QSize, pyqtSignal, QPoint, QRect
+from PyQt6.QtCore import Qt, QUrl, QTimer, QThread, QProcess, QProcessEnvironment, QSize, pyqtSignal, QPoint, QRect, QEvent
 from telethon import TelegramClient
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -1355,23 +1355,14 @@ class ExtendedHUD(HudDataMixin, QWidget):
         
         self.setStyleSheet(HUD_THEME_STYLESHEET)
         
-        # Setup for second monitor
+        # Live-wallpaper: cover the ENTIRE target screen (over the taskbar).
         screens = QApplication.screens()
         if len(screens) > 1:
             screen_geometry = screens[1].geometry()
-            self.setGeometry(screen_geometry)
         else:
-            # Fallback: centered window on the primary screen, clamped to fit
-            avail = QApplication.primaryScreen().availableGeometry()
-            w = min(1400, avail.width())
-            h = min(900, avail.height())
-            self.setGeometry(
-                avail.x() + max(0, (avail.width() - w) // 2),
-                avail.y() + max(0, (avail.height() - h) // 2),
-                w, h,
-            )
-
-        self.setMinimumSize(1000, 600)
+            screen_geometry = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen_geometry)
+        self.setFixedSize(screen_geometry.width(), screen_geometry.height())
 
         # Main layout
         main_layout = QHBoxLayout()
@@ -1523,6 +1514,16 @@ class ExtendedHUD(HudDataMixin, QWidget):
         layout.addStretch()
         return panel
 
+    def changeEvent(self, event):
+        # Wallpaper must never be minimized: if a minimize slips through
+        # (e.g. Win+D / Win+M), immediately restore to normal.
+        if (
+            event.type() == QEvent.Type.WindowStateChange
+            and self.isMinimized()
+        ):
+            QTimer.singleShot(0, self.showNormal)
+        super().changeEvent(event)
+
     def closeEvent(self, event):
         # Stop workers if they exist (ExtendedHUD may be used without creating internal workers)
         if hasattr(self, 'financial_worker'):
@@ -1556,15 +1557,16 @@ class CyberPanel(QWidget):
     def __init__(self):
         super().__init__()
 
-        # Normal resizable window that fits the screen, with a minimum sensible size
+        # Live-wallpaper window: frameless, covers the ENTIRE screen (over the
+        # taskbar), pinned to the bottom, and cannot be minimized or dismissed.
         self.setWindowTitle("JARVIS Panel")
-        available_geometry = QApplication.primaryScreen().availableGeometry()
-        self.resize(
-            min(available_geometry.width(), 1600),
-            min(available_geometry.height(), 980),
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnBottomHint
         )
-        self.setMinimumSize(900, 560)
-        self.move(available_geometry.topLeft())
+        screen_geometry = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen_geometry)
+        self.setFixedSize(screen_geometry.width(), screen_geometry.height())
         self.setStyleSheet(HUD_THEME_STYLESHEET)
         
 
@@ -1938,6 +1940,16 @@ class CyberPanel(QWidget):
         self.telegram_worker.set_password(password if accepted else "")
 
 
+    def changeEvent(self, event):
+        # Wallpaper must never be minimized: if a minimize slips through
+        # (e.g. Win+D / Win+M), immediately restore to normal.
+        if (
+            event.type() == QEvent.Type.WindowStateChange
+            and self.isMinimized()
+        ):
+            QTimer.singleShot(0, self.showNormal)
+        super().changeEvent(event)
+
     def closeEvent(self, event):
         self.telegram_worker.stop()
         self.telegram_worker.wait(3000)
@@ -1992,7 +2004,7 @@ if __name__ == '__main__':
     app.processEvents()
 
     panel = CyberPanel()
-    panel.show()
+    panel.showFullScreen()
 
     # Second-monitor HUD window, fed by CyberPanel's data workers
     extended_hud = ExtendedHUD()
@@ -2001,7 +2013,7 @@ if __name__ == '__main__':
     panel.youtube_worker.videos_updated.connect(extended_hud.update_videos)
     panel.news_worker.news_updated.connect(extended_hud.update_news)
     panel.extended_hud_window = extended_hud
-    extended_hud.show()
+    extended_hud.showFullScreen()
 
     startup.raise_()
     QTimer.singleShot(1800, startup.close)
