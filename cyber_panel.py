@@ -781,8 +781,12 @@ class TelegramWorker(QThread):
 
                 messages.sort(key=lambda item: item[0], reverse=True)
                 if messages:
-                    output = "\n\n".join(
-                        f"{name}: {text[:180]}" for _, name, text in messages[:5]
+                    # Show only the first line of each of the last 5 messages,
+                    # so the Telegram block stays compact and the panel keeps
+                    # a stable size.
+                    output = "\n".join(
+                        f"{name}: {text.splitlines()[0][:100] if text.strip() else ''}"
+                        for _, name, text in messages[:5]
                     )
                     self.messages_ready.emit(output)
                 else:
@@ -1627,7 +1631,7 @@ class CyberPanel(QWidget):
             "border: 1px solid #286e6b; border-radius: 8px; padding: 12px; font-size: 12px;"
         )
         self.telegram_label.clicked.connect(self.open_telegram)
-        metrics_layout.addWidget(self.telegram_label, 1)
+        metrics_layout.addWidget(self.telegram_label)
 
         shortcuts_layout = QHBoxLayout()
         shortcuts_layout.setSpacing(8)
