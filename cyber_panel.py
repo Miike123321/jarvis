@@ -135,8 +135,8 @@ HUD_THEME_STYLESHEET = f"""
         color: {ACCENT_CYAN};
         background-color: transparent;
         border: 2px solid {ACCENT_CYAN_DIM};
-        border-radius: 8px;
-        padding: 7px 14px;
+        border-radius: 16px;
+        padding: 8px 18px;
         font-weight: bold;
     }}
     QPushButton:hover {{
@@ -148,34 +148,34 @@ HUD_THEME_STYLESHEET = f"""
     QListWidget {{
         background-color: {PANEL_FILL};
         border: 1px solid {ACCENT_CYAN_DIM};
-        border-radius: 6px;
+        border-radius: 16px;
         color: {NEON_TEXT};
         selection-color: {NEON_BACKGROUND};
         selection-background-color: {ACCENT_CYAN};
     }}
-    QListWidget::item {{ padding: 3px; }}
+    QListWidget::item {{ padding: 4px; }}
     QLineEdit {{
         background-color: {PANEL_FILL};
         border: 1px solid {ACCENT_CYAN_DIM};
-        border-radius: 5px;
+        border-radius: 14px;
         padding: 6px;
         color: {NEON_TEXT};
     }}
     QPlainTextEdit, QScrollArea {{
         background-color: {PANEL_FILL};
         border: 1px solid {ACCENT_CYAN_DIM};
-        border-radius: 8px;
+        border-radius: 16px;
     }}
     QScrollBar:vertical, QScrollBar:horizontal {{
         background: {PANEL_FILL};
-        border-radius: 6px;
+        border-radius: 8px;
         margin: 2px;
     }}
     QScrollBar:vertical {{ width: 10px; }}
     QScrollBar:horizontal {{ height: 10px; }}
     QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
         background: {ACCENT_CYAN_DIM};
-        border-radius: 5px;
+        border-radius: 8px;
         min-height: 24px;
         min-width: 24px;
     }}
@@ -187,7 +187,7 @@ HUD_THEME_STYLESHEET = f"""
     QCheckBox::indicator {{
         width: 14px; height: 14px;
         border: 1px solid {ACCENT_CYAN_DIM};
-        border-radius: 3px;
+        border-radius: 6px;
         background: {PANEL_FILL};
     }}
     QCheckBox::indicator:checked {{ background: {ACCENT_CYAN}; }}
@@ -195,13 +195,13 @@ HUD_THEME_STYLESHEET = f"""
 
 
 def panel_style(object_name=None, pad=10):
-    """Rounded neon-edged panel style, theme-consistent."""
+    """Softer, rounded neon-edged panel style, theme-consistent."""
     sel = f"#{object_name}" if object_name else "QWidget"
     return (
         f"{sel} {{ background-color: {PANEL_FILL}; "
-        f"border: 2px solid {ACCENT_CYAN}; border-radius: 14px; padding: {pad}px; }}"
+        f"border: 2px solid {ACCENT_CYAN}; border-radius: 24px; padding: {pad}px; }}"
         if object_name
-        else f"background-color: {PANEL_FILL}; border: 2px solid {ACCENT_CYAN}; border-radius: 14px;"
+        else f"background-color: {PANEL_FILL}; border: 2px solid {ACCENT_CYAN}; border-radius: 24px;"
     )
 
 
@@ -946,7 +946,7 @@ class TelegramTicker(QWidget):
         self.setMaximumWidth(450)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(
-            "background-color: #101f21; border: 1px solid #286e6b; border-radius: 8px;"
+            "background-color: #101f21; border: 1px solid #286e6b; border-radius: 12px;"
         )
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -1724,7 +1724,7 @@ class CyberPanel(QWidget):
         self.terminal = EmbeddedTerminal()
         self.terminal.setMinimumWidth(250)
         self.terminal.setMaximumWidth(450)
-        self.terminal.setMinimumHeight(180)
+        self.terminal.setMinimumHeight(110)
         metrics_layout.addWidget(self.terminal, 1)
 
         terminal_buttons = QHBoxLayout()
@@ -1809,8 +1809,8 @@ class CyberPanel(QWidget):
         right_layout.setSpacing(10)
 
         sphere = NeonSphereWidget()
-        sphere.setMinimumHeight(220)
-        sphere.setMaximumHeight(260)
+        sphere.setMinimumHeight(150)
+        sphere.setMaximumHeight(190)
         right_layout.addWidget(sphere)
 
         self.clock_label = QLabel()
@@ -1825,7 +1825,7 @@ class CyberPanel(QWidget):
         self.weather_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.weather_label.setStyleSheet(
             "color: #bffef1; background-color: #101f21; "
-            "border: 1px solid #286e6b; border-radius: 8px; padding: 8px; font-size: 14px;"
+            "border: 1px solid #286e6b; border-radius: 14px; padding: 10px; font-size: 14px;"
         )
         right_layout.addWidget(self.weather_label)
 
@@ -1838,7 +1838,7 @@ class CyberPanel(QWidget):
         self.events_view.setMinimumHeight(112)
         self.events_view.setStyleSheet(
             "color: #b8eee4; background-color: #0d1719; "
-            "border: 1px solid #286e6b; border-radius: 8px; padding: 8px; font-size: 12px;"
+            "border: 1px solid #286e6b; border-radius: 14px; padding: 10px; font-size: 12px;"
         )
         self.events_view.setPlainText("CALENDAR: CONNECTING...")
         # stretch=1 so the calendar fills down to the bottom line, level with
