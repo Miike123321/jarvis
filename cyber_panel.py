@@ -1717,8 +1717,6 @@ class CyberPanel(QWidget):
             button.setIconSize(QSize(40, 40))
         metrics_layout.addLayout(shortcuts_layout)
 
-        metrics_layout.addStretch()
-
         terminal_title = QLabel("EMBEDDED TERMINAL")
         terminal_title.setObjectName("sectionTitle")
         metrics_layout.addWidget(terminal_title)
