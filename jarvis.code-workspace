@@ -1,0 +1,23 @@
+{
+  "folders": [
+    { "name": "🎛 admin (штурвал)", "path": "admin" },
+    { "name": "🗄 jarvis-sql", "path": "jarvis-sql" },
+    { "name": "🌫 mist", "path": "mist" },
+    { "name": "✈️ telegramm", "path": "telegramm" }
+  ],
+  "settings": {
+    "git.repositoryScanMaxDepth": 1,
+    "editor.formatOnSave": true,
+    "files.exclude": {
+      "**/.git.bak-*": true,
+      "**/__pycache__": true,
+      "**/.venv": true
+    },
+    ".exclude": {
+      "**/node_modules": true,
+      "**/.venv": true,
+      "**/dist": true,
+      "**/build": true
+    }
+  }
+}

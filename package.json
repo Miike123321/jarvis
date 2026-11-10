@@ -1,0 +1,28 @@
+{
+  "name": "jarvis",
+  "version": "0.1.0",
+  "private": true,
+  "description": "J.A.R.V.I.S — unified control hub (admin as the steering wheel)",
+  "workspaces": [
+    "admin/admin-panel",
+    "mist/meest-bonus-app"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n admin,mist -c cyan,magenta \"npm:dev:admin\" \"npm:dev:mist\"",
+    "dev:admin": "npm --workspace admin/admin-panel run dev",
+    "dev:mist": "npm --workspace mist/meest-bonus-app run dev",
+    "py:admin": "python3 admin/app.py",
+    "py:sql": "python3 jarvis-sql/streamlit_app.py",
+    "py:mist": "python3 mist/app.py",
+    "py:telegram": "python3 telegramm/telegramm-reader.py",
+    "all": "concurrently -k -n admin,sql,mist \"npm:dev:admin\" \"npm:py:sql\" \"npm:py:mist\"",
+    "build": "npm --workspace admin/admin-panel run build",
+    "lint": "npm --workspace admin/admin-panel run lint"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

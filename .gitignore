@@ -1,0 +1,50 @@
+# dependencies
+node_modules/
+.pnp/
+.pnp.*
+
+# env & secrets
+.env
+.env.local
+.env.*.local
+*.pem
+credentials.json
+token.json
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# builds
+dist/
+build/
+*.spec.bak
+.next/
+out/
+
+# logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+._*
+~$*
+
+# backups from monorepo migration
+.git.bak-*/
+*.bak
+
+# db / storage
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# vscode
+.vscode/*
+!.vscode/extensions.json
