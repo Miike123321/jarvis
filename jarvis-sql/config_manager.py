@@ -21,6 +21,7 @@ PLACEHOLDER_API_KEY = "replace_with_a_new_key"
 load_dotenv(BASE_DIR / ".env")
 
 
+
 def _is_placeholder(value: str | None) -> bool:
     if not isinstance(value, str):
         return True
