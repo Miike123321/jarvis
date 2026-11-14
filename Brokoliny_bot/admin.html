@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>broccolini — панель управления</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font: 14px/1.55 ui-monospace, "SFMono-Regular", Menlo, monospace;
+      color: #d7e8eb;
+      background: #071116;
+      --cyan: #66eaff;
+      --cyan-dim: #2f8290;
+      --amber: #ffba62;
+      --muted: #829ba2;
+      --panel: rgba(10, 25, 32, .88);
+      --line: rgba(102, 234, 255, .22);
+    }
+    * { box-sizing: border-box; }
+    body {
+      position: relative;
+      isolation: isolate;
+      max-width: 1320px;
+      min-height: 100vh;
+      margin: 0 auto;
+      padding: 30px clamp(16px, 3vw, 42px) 64px;
+      background:
+        radial-gradient(ellipse at 12% 0%, rgba(20, 119, 137, .18), transparent 34rem),
+        radial-gradient(ellipse at 92% 18%, rgba(174, 101, 34, .1), transparent 30rem);
+    }
+    body::before {
+      position: fixed;
+      z-index: -1;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(102, 234, 255, .035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(102, 234, 255, .035) 1px, transparent 1px);
+      background-size: 34px 34px;
+      content: "";
+      pointer-events: none;
+      mask-image: linear-gradient(to bottom, black, transparent 90%);
+    }
+    h1, h2, p { margin-top: 0; }
+    h1 {
+      margin-bottom: 4px;
+      color: #f0fbfc;
+      font: 600 clamp(24px, 4vw, 36px)/1.15 system-ui, sans-serif;
+      letter-spacing: .04em;
+    }
+    h1 span { color: var(--cyan); }
+    h2 {
+      margin-bottom: 14px;
+      color: var(--cyan);
+      font: 600 14px/1.4 system-ui, sans-serif;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    p { color: #a9bdc1; }
+    .masthead {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      padding: 6px 0 26px;
+      border-bottom: 1px solid var(--line);
+    }
+    .emblem {
+      position: relative;
+      display: grid;
+      flex: 0 0 62px;
+      width: 62px;
+      height: 62px;
+      place-items: center;
+      border: 1px solid var(--cyan-dim);
+      border-radius: 50%;
+      box-shadow: 0 0 28px rgba(102, 234, 255, .14), inset 0 0 18px rgba(102, 234, 255, .08);
+    }
+    .emblem::before, .emblem::after {
+      position: absolute;
+      border: 1px solid rgba(102, 234, 255, .48);
+      border-radius: 50%;
+      content: "";
+    }
+    .emblem::before { inset: 8px; border-style: dashed; }
+    .emblem::after { width: 15px; height: 15px; background: var(--cyan); box-shadow: 0 0 18px var(--cyan); }
+    .mast-copy { flex: 1; min-width: 0; }
+    .eyebrow, .system-state small {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--muted);
+      font-size: 10px;
+      letter-spacing: .17em;
+      text-transform: uppercase;
+    }
+    .mast-copy p { margin-bottom: 0; font: 13px/1.5 system-ui, sans-serif; }
+    .system-state {
+      min-width: 170px;
+      padding: 10px 13px;
+      border-left: 1px solid var(--line);
+      color: #a9f6c8;
+      font-size: 10px;
+      letter-spacing: .12em;
+      text-align: right;
+    }
+    .system-state span::before {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      margin-right: 8px;
+      border-radius: 50%;
+      background: #69efaa;
+      box-shadow: 0 0 10px #69efaa;
+      content: "";
+    }
+    .system-state small { margin: 5px 0 0; }
+    section {
+      position: relative;
+      margin: 16px 0;
+      padding: 20px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 3px 14px 3px 14px;
+      background: linear-gradient(135deg, rgba(14, 33, 41, .96), var(--panel));
+      box-shadow: 0 12px 32px rgba(0, 0, 0, .18), inset 0 1px rgba(255, 255, 255, .025);
+    }
+    section::before {
+      position: absolute;
+      top: 0;
+      left: 18px;
+      width: 68px;
+      height: 1px;
+      background: var(--cyan);
+      box-shadow: 0 0 10px var(--cyan);
+      content: "";
+    }
+    .auth-panel { margin-top: 20px; border-color: rgba(255, 186, 98, .32); }
+    .auth-panel::before { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr)); gap: 0 14px; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    input, textarea, select, button {
+      max-width: 100%;
+      padding: 9px 11px;
+      border: 1px solid rgba(102, 234, 255, .28);
+      border-radius: 4px;
+      background: rgba(3, 13, 18, .8);
+      color: #e2f3f5;
+      font: inherit;
+    }
+    input:focus, textarea:focus, select:focus, button:focus-visible {
+      outline: 2px solid var(--cyan);
+      outline-offset: 2px;
+    }
+    input::placeholder { color: #738a90; }
+    button {
+      cursor: pointer;
+      background: rgba(23, 80, 91, .42);
+      color: var(--cyan);
+      transition: background .16s ease, box-shadow .16s ease, border-color .16s ease;
+    }
+    button:hover { border-color: var(--cyan); background: rgba(28, 102, 116, .48); box-shadow: 0 0 14px rgba(102, 234, 255, .12); }
+    button.danger { border-color: rgba(255, 117, 103, .5); background: rgba(102, 34, 34, .3); color: #ff9a8f; }
+    button.danger:hover { border-color: #ff7567; background: rgba(142, 41, 36, .55); }
+    textarea { display: block; width: min(100%, 850px); min-height: 120px; margin: 8px 0; resize: vertical; }
+    label { color: #b7cbd0; }
+    #users { display: grid; gap: 8px; margin-top: 12px; }
+    #users .row { justify-content: space-between; padding: 8px; border: 1px solid rgba(102, 234, 255, .1); background: rgba(4, 15, 20, .5); }
+    #users .row button:first-child { flex: 1; text-align: left; }
+    pre {
+      overflow: auto;
+      padding: 12px;
+      border: 1px solid rgba(102, 234, 255, .12);
+      border-radius: 4px;
+      background: rgba(2, 10, 14, .8);
+      color: #c4dadd;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px; border-bottom: 1px solid rgba(102, 234, 255, .15); text-align: left; }
+    th { color: var(--cyan); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+    #status { min-height: 1.5em; margin: 10px 0 0; color: var(--amber); }
+    details { margin: 8px 0; }
+    summary { color: #bdebf0; cursor: pointer; }
+    a { color: var(--cyan); }
+    @media (max-width: 600px) {
+      body { padding-top: 18px; }
+      .masthead { align-items: flex-start; gap: 12px; }
+      .emblem { flex-basis: 44px; width: 44px; height: 44px; }
+      .system-state { min-width: 0; padding: 6px 0 6px 10px; font-size: 8px; }
+      .system-state small { display: none; }
+      section { padding: 16px; }
+      #users .row { align-items: stretch; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="masthead">
+    <div class="emblem" aria-hidden="true"></div>
+    <div class="mast-copy">
+      <span class="eyebrow">BROCCOLINI / AI day-care systems</span>
+      <h1>BROCCOLINI <span>CONTROL</span></h1>
+      <p>Центр управления персональными планами и системой обучения</p>
+    </div>
+    <div class="system-state" aria-label="Локальная панель управления">
+      <span>ЛОКАЛЬНАЯ СЕССИЯ</span>
+      <small>ЗАЩИЩЁННЫЙ ДОСТУП</small>
+    </div>
+  </header>
+  <section class="auth-panel">
+    <h2>Подключение администратора</h2>
+    <p>Доступ к данным защищён токеном. Не вводите его на общих устройствах.</p>
+    <div class="row">
+      <label for="token">Токен администратора</label>
+      <input id="token" type="password" autocomplete="off">
+      <button onclick="connect()">Подключиться</button>
+      <button onclick="disconnect()">Выйти</button>
+    </div>
+    <p id="status" role="status"></p>
+  </section>
+  <div class="grid">
+    <section>
+      <h2>Пользователи и профили</h2>
+      <p>Удаление очистит профиль, навыки, планы и историю выданных заданий. Сообщения в самом Telegram бот не хранит.</p>
+      <p>Контактные данные отображаются только после отдельного согласия пользователя; они зашифрованы и не передаются AI.</p>
+      <button onclick="loadUsers()">Обновить список</button>
+      <div id="users"></div>
+      <div id="profile"></div>
+    </section>
+    <section>
+      <h2>План на завтра</h2>
+      <label for="plan-user">Telegram ID</label>
+      <input id="plan-user" inputmode="numeric">
+      <div class="row">
+        <button onclick="regenerate()">Перегенерировать</button>
+        <button onclick="loadPlans()">История планов</button>
+      </div>
+      <p>Для ручного редактирования вставьте JSON полного плана. Структура проверяется сервером.</p>
+      <textarea id="plan-json" aria-label="JSON плана"></textarea>
+      <button onclick="savePlan()">Сохранить на завтра</button>
+      <div id="plans"></div>
+    </section>
+  </div>
+  <section>
+    <h2>AI-маршруты</h2>
+    <div id="routes"></div>
+    <h2>Лимиты</h2>
+    <div id="budget"></div>
+    <h2>Системные промты</h2>
+    <div id="prompts"></div>
+    <h2>API-ключ</h2>
+    <div class="row">
+      <select id="provider">
+        <option value="gemini">Gemini</option><option value="openai">OpenAI</option>
+        <option value="anthropic">Anthropic</option><option value="vertex_ai">Vertex AI</option>
+        <option value="replicate">Replicate / Flux</option>
+      </select>
+      <input id="api-key" type="password" autocomplete="new-password" placeholder="Новый ключ">
+      <button onclick="saveSecret()">Зашифровать и сохранить</button>
+    </div>
+  </section>
+  <section>
+    <h2>Кэш заданий и игр</h2>
+    <button onclick="loadContent()">Показать кэш выбранного пользователя</button>
+    <div id="content-cache"></div>
+  </section>
+  <section>
+    <h2>Кэш изображений</h2>
+    <button onclick="loadImages()">Обновить кэш</button>
+    <div id="images"></div>
+    <h2>Векторные шаблоны</h2>
+    <button onclick="loadTemplates()">Обновить шаблоны</button>
+    <div id="templates"></div>
+  </section>
+<script>
+  const tokenInput = document.querySelector("#token");
+  tokenInput.value = sessionStorage.getItem("adminToken") || "";
+  const statusBox = document.querySelector("#status");
+  function authHeaders() {
+    return { "Authorization": `Bearer ${tokenInput.value}`, "Content-Type": "application/json" };
+  }
+  async function api(path, options = {}) {
+    const response = await fetch(path, { ...options, headers: { ...authHeaders(), ...options.headers } });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+    return body;
+  }
+  function showError(error) { statusBox.textContent = error.message; }
+  async function connect() {
+    sessionStorage.setItem("adminToken", tokenInput.value);
+    try {
+      await loadUsers();
+      await Promise.all([loadRoutes(), loadBudget(), loadPrompts(), loadImages(), loadTemplates()]);
+      statusBox.textContent = "Подключено.";
+    } catch (error) { showError(error); }
+  }
+  function disconnect() {
+    sessionStorage.removeItem("adminToken");
+    tokenInput.value = "";
+    document.querySelectorAll("#users, #profile, #routes, #budget, #prompts, #images, #plans")
+      .forEach(element => element.replaceChildren());
+    statusBox.textContent = "Токен удалён из этой вкладки.";
+  }
+  async function loadUsers() {
+    const users = await api("/admin/users");
+    document.querySelector("#users").innerHTML = users.map(user => {
+      const identity = user.identity_consent === "granted"
+        ? [user.full_name, `ребёнок: ${user.child_name}`, user.phone_number]
+          .filter(Boolean).map(escapeHtml).join(" · ")
+        : user.identity_consent === "denied"
+          ? "Контакты: отказ"
+          : "Контакты: не предоставлены";
+      return `<div class="row"><button onclick="selectUser(${user.telegram_id})"><strong>${identity || "Контакты сохранены"}</strong><br>
+        Дата рождения: ${user.birth_date ? escapeHtml(user.birth_date) : "не указана"} ·
+        возраст: ${user.age_months ?? "—"} мес<br>
+        ${user.telegram_id} ·
+        ${user.language === "uk" ? "Українська" : "Русский"} ·
+        ${escapeHtml(user.created_at)} · ${escapeHtml(user.subscription_status)} ·
+        ${user.active ? "активен" : "онбординг"} · ${escapeHtml(user.delivery_time)}</button>
+        <button class="danger" onclick="deleteUser(${user.telegram_id})">Удалить пользователя</button></div>`;
+    }).join("");
+  }
+  async function deleteUser(id) {
+    const confirmed = window.confirm(
+      `Удалить пользователя ${id} и все его данные в боте: профиль, навыки, планы и историю заданий? Это действие нельзя отменить.`
+    );
+    if (!confirmed) return;
+    try {
+      await api(`/admin/users/${id}`, { method: "DELETE" });
+      if (document.querySelector("#plan-user").value === String(id)) {
+        document.querySelector("#plan-user").value = "";
+        document.querySelector("#plan-json").value = "";
+        document.querySelector("#plans").replaceChildren();
+        document.querySelector("#content-cache").replaceChildren();
+        document.querySelector("#profile").replaceChildren();
+      }
+      await loadUsers();
+      statusBox.textContent = `Пользователь ${id} и его данные удалены. Общий кэш контента сохранён.`;
+    } catch (error) { showError(error); }
+  }
+  async function selectUser(id) {
+    document.querySelector("#plan-user").value = id;
+    try {
+      const profile = await api(`/admin/users/${id}`);
+      const skills = profile.skills.map(skill =>
+        `<tr><td>${escapeHtml(skill.skill_id)}</td><td>${escapeHtml(skill.domain)}</td>
+         <td>${skill.result === "independent" ? "Закрыт" : `Пробел: ${escapeHtml(skill.result)}`}</td></tr>`
+      ).join("");
+      document.querySelector("#profile").innerHTML =
+        `<p>${profile.age_months} мес. · дата рождения ${escapeHtml(profile.birth_date || "не указана")} ·
+         ${escapeHtml(profile.gender)} ·
+         ${profile.language === "uk" ? "Українська" : "Русский"} ·
+         рассылка ${escapeHtml(profile.delivery_time)}</p>
+         <p>Заметка о здоровье: ${profile.has_diagnosis_notes ? "есть (доступна администратору)" : "нет"}</p>
+         <table><thead><tr><th>Навык</th><th>Домены</th><th>Наблюдение</th></tr></thead><tbody>${skills}</tbody></table>
+         <details><summary>Полные данные профиля</summary><pre>${escapeHtml(JSON.stringify(profile, null, 2))}</pre></details>`;
+    } catch (error) { showError(error); }
+  }
+  async function loadPlans() {
+    try {
+      const plans = await api(`/admin/users/${document.querySelector("#plan-user").value}/plans`);
+      const id = document.querySelector("#plan-user").value;
+      document.querySelector("#plans").innerHTML = plans.map(plan =>
+        `<details><summary>${escapeHtml(plan.plan_date)} · ${escapeHtml(plan.status)}
+          <a target="_blank" rel="noopener" href="/admin/users/${id}/plans/${plan.plan_date}/worksheet.pdf">PDF</a>
+        </summary>${plan.status === "sent"
+          ? `<button onclick="resendPlan(${id}, '${escapeHtml(plan.plan_date)}')">Отправить этот план повторно</button>`
+          : ""}
+          <pre>${escapeHtml(JSON.stringify(plan.content, null, 2))}</pre></details>`
+      ).join("");
+    } catch (error) { showError(error); }
+  }
+  async function resendPlan(id, planDate) {
+    if (!window.confirm(`Повторно отправить пользователю ${id} план за ${planDate}?`)) return;
+    try {
+      await api(`/admin/users/${id}/plans/${planDate}/resend`, { method: "POST" });
+      statusBox.textContent = `План за ${planDate} повторно отправлен пользователю ${id}.`;
+    } catch (error) { showError(error); }
+  }
+  async function regenerate() {
+    try {
+      const id = document.querySelector("#plan-user").value;
+      const result = await api(`/admin/users/${id}/plans/tomorrow/regenerate`, { method: "POST" });
+      document.querySelector("#plan-json").value = JSON.stringify(result.plan, null, 2);
+      statusBox.textContent = `План ${result.plan_date} создан и ожидает проверки/отправки.`;
+    } catch (error) { showError(error); }
+  }
+  async function savePlan() {
+    try {
+      const id = document.querySelector("#plan-user").value;
+      const plan = JSON.parse(document.querySelector("#plan-json").value);
+      const result = await api(`/admin/users/${id}/plans/tomorrow`, {
+        method: "PUT", body: JSON.stringify({ plan })
+      });
+      statusBox.textContent = `План на ${result.plan_date} сохранён.`;
+    } catch (error) { showError(error); }
+  }
+  async function loadRoutes() {
+    const routes = await api("/admin/settings/routes");
+    document.querySelector("#routes").innerHTML = Object.entries(routes).map(([task, route]) =>
+      `<div class="row"><b>${task}</b><select id="provider-${task}">${["gemini","openai","anthropic","vertex_ai","replicate"].map(value =>
+        `<option ${route.provider === value ? "selected" : ""}>${value}</option>`).join("")}</select>
+        <input id="model-${task}" value="${escapeHtml(route.model)}">
+        <input id="tokens-${task}" type="number" value="${route.max_tokens}" min="100" max="16000">
+        <button onclick="saveRoute('${task}')">Сохранить</button></div>`
+    ).join("");
+  }
+  async function saveRoute(task) {
+    try {
+      await api(`/admin/settings/routes/${task}`, { method: "PUT", body: JSON.stringify({
+        provider: document.querySelector(`#provider-${task}`).value,
+        model: document.querySelector(`#model-${task}`).value,
+        max_tokens: Number(document.querySelector(`#tokens-${task}`).value)
+      })});
+      statusBox.textContent = `Маршрут ${task} обновлён.`;
+    } catch (error) { showError(error); }
+  }
+  async function loadBudget() {
+    const value = await api("/admin/settings/budget");
+    document.querySelector("#budget").innerHTML = `<div class="row">
+      <label>USD/день <input id="budget-usd" type="number" min="0" step="0.1" value="${value.daily_budget_usd}"></label>
+      <label>Макс. токенов <input id="budget-tokens" type="number" min="100" value="${value.max_tokens}"></label>
+      <span>Потрачено: $${value.spent_today_usd}</span>
+      <button onclick="saveBudget()">Сохранить лимиты</button></div>`;
+  }
+  async function saveBudget() {
+    try {
+      await api("/admin/settings/budget", { method: "PUT", body: JSON.stringify({
+        daily_budget_usd: Number(document.querySelector("#budget-usd").value),
+        max_tokens: Number(document.querySelector("#budget-tokens").value)
+      })});
+      await loadBudget();
+      statusBox.textContent = "Лимиты обновлены.";
+    } catch (error) { showError(error); }
+  }
+  async function loadPrompts() {
+    const prompts = await api("/admin/settings/prompts");
+    const promptTitles = {
+      safety: "Безопасность",
+      diagnostics: "Диагностика",
+      daily_plan: "Дневной план",
+      image: "Стиль изображений"
+    };
+    document.querySelector("#prompts").innerHTML = prompts.map(item =>
+      `<label>${promptTitles[item.name] || escapeHtml(item.name)} · версия ${item.version}</label>
+       <textarea id="prompt-${item.name}">${escapeHtml(item.prompt)}</textarea>
+       <button onclick="savePrompt('${item.name}')">Сохранить промт</button>
+       <button onclick="loadPromptHistory('${item.name}')">История версий</button>
+       <div id="history-${item.name}"></div>`
+    ).join("");
+  }
+  async function savePrompt(name) {
+    try {
+      const prompt = document.querySelector(`#prompt-${name}`).value;
+      await api(`/admin/settings/prompts/${name}`, { method: "PUT", body: JSON.stringify({ prompt }) });
+      await loadPrompts();
+      statusBox.textContent = `Промт ${name} сохранён с новой версией.`;
+    } catch (error) { showError(error); }
+  }
+  async function loadPromptHistory(name) {
+    try {
+      const history = await api(`/admin/settings/prompts/${name}/history`);
+      document.querySelector(`#history-${name}`).innerHTML =
+        `<pre>${escapeHtml(JSON.stringify(history, null, 2))}</pre>`;
+    } catch (error) { showError(error); }
+  }
+  async function saveSecret() {
+    try {
+      const provider = document.querySelector("#provider").value;
+      const key = document.querySelector("#api-key").value;
+      await api(`/admin/settings/secrets/${provider}`, { method: "POST", body: JSON.stringify({ api_key: key }) });
+      document.querySelector("#api-key").value = "";
+      statusBox.textContent = `Ключ ${provider} сохранён в зашифрованном виде.`;
+    } catch (error) { showError(error); }
+  }
+  async function loadImages() {
+    const images = await api("/admin/images");
+    document.querySelector("#images").innerHTML = images.map(image =>
+      `<div class="row">${escapeHtml(image.tag)} · ${image.telegram_file_id ? "есть Telegram file_id" : "без file_id"}
+       <button onclick="deleteImage('${image.tag_hash}')">Удалить</button></div>`
+    ).join("");
+  }
+  async function loadContent() {
+    try {
+      const id = document.querySelector("#plan-user").value;
+      const content = await api(`/admin/content-cache?telegram_id=${encodeURIComponent(id)}`);
+      document.querySelector("#content-cache").innerHTML = content.map(item =>
+        `<details><summary>${escapeHtml(item.category)} · ${item.used_by_user ? "уже выдавалось" : "ещё не выдавалось"}</summary>
+         <pre>${escapeHtml(JSON.stringify(item.content, null, 2))}</pre>
+         <button onclick="deleteContent('${item.content_hash}')">Удалить из общего кэша</button></details>`
+      ).join("");
+    } catch (error) { showError(error); }
+  }
+  async function deleteContent(hash) {
+    try {
+      await api(`/admin/content-cache/${hash}`, { method: "DELETE" });
+      await loadContent();
+      statusBox.textContent = "Элемент удалён из общего кэша.";
+    } catch (error) { showError(error); }
+  }
+  async function loadTemplates() {
+    const templates = await api("/admin/templates");
+    document.querySelector("#templates").innerHTML =
+      `<pre>${escapeHtml(JSON.stringify(templates, null, 2))}</pre>`;
+  }
+  async function deleteImage(hash) {
+    try { await api(`/admin/images/${hash}`, { method: "DELETE" }); await loadImages(); }
+    catch (error) { showError(error); }
+  }
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, char => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    })[char]);
+  }
+</script>
+</body>
+</html>

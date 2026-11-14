@@ -1,0 +1,10 @@
+aiogram>=3.13,<4
+apscheduler>=3.10,<4
+cryptography>=43
+fastapi>=0.115
+litellm>=1.50
+pillow>=11
+pydantic>=2.9
+python-dotenv>=1
+reportlab>=4.2
+uvicorn[standard]>=0.32
