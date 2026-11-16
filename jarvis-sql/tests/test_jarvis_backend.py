@@ -5,10 +5,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+# AppTest may run the app in an isolated script context.
+os.environ["JARVIS_DISABLE_SUPERSET_MCP"] = "true"
+
 import httpx
 from fastapi import WebSocketDisconnect
 from google import genai
 from google.genai import types
+from streamlit.runtime.secrets import Secrets
 from streamlit.testing.v1 import AppTest
 
 import config_manager as config_manager_module
@@ -17,10 +21,13 @@ from config_manager import (
     DatabaseConfig,
     ModelConfig,
     PLACEHOLDER_API_KEY,
+    SupersetMCPConfig,
     normalize_omniroute_base_url,
 )
 from jarvis_backend import (
     GeminiChat,
+    MAX_GEMINI_TOOL_ROUNDS,
+    MAX_QUERY_RESULT_CHARS,
     OmnirouteChat,
     create_chat,
     execute_ddl_statement,
@@ -31,6 +38,7 @@ from jarvis_backend import (
     config_manager as app_config_manager,
     websocket_endpoint,
 )
+from superset_mcp import SupersetMCPError
 
 
 class GeminiChatTests(unittest.TestCase):
@@ -60,14 +68,21 @@ class GeminiChatTests(unittest.TestCase):
             provider="gemini", model_name="gemini-2.5-flash", api_key="test-key"
         )
         with patch("jarvis_backend.config_manager.get_model_config", return_value=model):
-            with patch("jarvis_backend.genai.Client", return_value=client) as factory:
+            with patch(
+                "jarvis_backend.config_manager.get_superset_mcp_config",
+                return_value=SupersetMCPConfig(),
+            ), patch("jarvis_backend.genai.Client", return_value=client) as factory:
                 chat = create_chat()
                 factory.return_value = None
                 del client
 
+            self.assertIn("не более 5 пунктов", chat.system_instruction)
             self.assertEqual(chat.send_message("first").text, "OK")
             self.assertEqual(chat.send_message("second").text, "OK")
             self.assertEqual(len(requests), 2)
+            for request in requests:
+                body = json.loads(request.content)
+                self.assertNotIn("maxOutputTokens", body.get("generationConfig", {}))
             self.assertEqual(len(json.loads(requests[1].content)["contents"]), 3)
             self.assertFalse(http_client.is_closed)
             chat.close()
@@ -78,7 +93,7 @@ class GeminiChatTests(unittest.TestCase):
 
         def respond(request):
             requests.append(json.loads(request.content))
-            if len(requests) <= 25:
+            if len(requests) <= MAX_GEMINI_TOOL_ROUNDS:
                 part = {
                     "functionCall": {
                         "name": "execute_read_only_query",
@@ -112,17 +127,72 @@ class GeminiChatTests(unittest.TestCase):
 
         self.assertIn("частич", response.text.lower())
         self.assertEqual(follow_up.text, "Получены частичные результаты.")
-        self.assertEqual(len(requests), 27)
-        self.assertEqual(
-            requests[-2]["toolConfig"]["functionCallingConfig"]["mode"], "NONE"
-        )
-        self.assertIn(
-            "functionResponse", requests[-2]["contents"][-1]["parts"][0]
-        )
+        self.assertEqual(len(requests), MAX_GEMINI_TOOL_ROUNDS + 2)
+        for request in requests:
+            self.assertNotIn("maxOutputTokens", request.get("generationConfig", {}))
+        self.assertFalse(requests[-2].get("tools"))
+        self.assertTrue(requests[-1].get("tools"))
+        self.assertIn("data", requests[-2]["contents"][-1]["parts"][0]["text"])
         self.assertEqual(
             requests[-1]["contents"][-2]["parts"][0]["text"],
             "Получены частичные результаты.",
         )
+        chat.close()
+
+    def test_limit_summary_uses_plain_text_even_when_model_repeats_tool_calls(self):
+        requests = []
+        queries = []
+
+        def query(sql_query: str) -> str:
+            queries.append(sql_query)
+            return '{"data": [{"value": 42}]}'
+
+        query.__name__ = "execute_read_only_query"
+
+        def respond(request):
+            body = json.loads(request.content)
+            requests.append(body)
+            has_tool_history = any(
+                "functionCall" in part
+                for content in body["contents"]
+                for part in content.get("parts", [])
+            )
+            if body.get("tools") or has_tool_history:
+                part = {
+                    "functionCall": {
+                        "name": "execute_read_only_query",
+                        "args": {"sql_query": "SELECT 42"},
+                    }
+                }
+            else:
+                part = {"text": "Результат: 42."}
+            return httpx.Response(200, json={
+                "candidates": [{
+                    "content": {"role": "model", "parts": [part]},
+                    "finishReason": "STOP",
+                }]
+            })
+
+        client = genai.Client(
+            api_key="test-key",
+            http_options=types.HttpOptions(
+                client_args={"transport": httpx.MockTransport(respond)}
+            ),
+        )
+        with patch("jarvis_backend.genai.Client", return_value=client), \
+             patch("jarvis_backend.execute_read_only_query", query):
+            chat = GeminiChat("gemini-2.5-flash", "test-key", max_remote_calls=2)
+            response = chat.send_message("Покажи результат")
+
+        self.assertIn("Результат: 42.", response.text)
+        self.assertIn("могут быть неполными", response.text)
+        self.assertEqual(len(queries), 2)
+        self.assertEqual(len(requests), 3)
+        self.assertFalse(requests[-1].get("tools"))
+        summary_text = requests[-1]["contents"][-1]["parts"][0]["text"]
+        self.assertIn("42", summary_text)
+        self.assertIn("SELECT 42", summary_text)
+        self.assertNotIn("functionCall", json.dumps(requests[-1]["contents"]))
         chat.close()
 
     def test_blocked_response_reports_reason(self):
@@ -141,13 +211,82 @@ class GeminiChatTests(unittest.TestCase):
         self.assertEqual(chat.chat.get_history(), [])
         chat.close()
 
+    def test_max_tokens_error_reports_provider_limit(self):
+        client = genai.Client(
+            api_key="test-key",
+            http_options=types.HttpOptions(
+                client_args={
+                    "transport": httpx.MockTransport(
+                        lambda request: httpx.Response(
+                            200,
+                            json={
+                                "candidates": [
+                                    {
+                                        "content": {
+                                            "role": "model",
+                                            "parts": [],
+                                        },
+                                        "finishReason": "MAX_TOKENS",
+                                    }
+                                ]
+                            },
+                        )
+                    )
+                }
+            ),
+        )
+        with patch("jarvis_backend.genai.Client", return_value=client):
+            chat = GeminiChat("gemini-2.5-flash", "test-key")
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "исчерпан лимит генерации Gemini",
+            ):
+                chat.send_message("Ответь на вопрос.")
+        chat.close()
+
+    def test_partial_text_with_max_tokens_is_marked_incomplete(self):
+        client = genai.Client(
+            api_key="test-key",
+            http_options=types.HttpOptions(
+                client_args={
+                    "transport": httpx.MockTransport(
+                        lambda request: httpx.Response(
+                            200,
+                            json={
+                                "candidates": [
+                                    {
+                                        "content": {
+                                            "role": "model",
+                                            "parts": [{"text": "Частичный ответ."}],
+                                        },
+                                        "finishReason": "MAX_TOKENS",
+                                    }
+                                ]
+                            },
+                        )
+                    )
+                }
+            ),
+        )
+        with patch("jarvis_backend.genai.Client", return_value=client):
+            chat = GeminiChat("gemini-2.5-flash", "test-key")
+            response = chat.send_message("Ответь на вопрос.")
+
+        self.assertIn("Частичный ответ.", response.text)
+        self.assertIn("может быть неполным", response.text)
+        chat.close()
+
     def test_connection_test_reports_gemini_block_reason(self):
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            return httpx.Response(200, json={"promptFeedback": {"blockReason": "SAFETY"}})
+
         client = genai.Client(
             api_key="test-key",
             http_options=types.HttpOptions(client_args={
-                "transport": httpx.MockTransport(lambda request: httpx.Response(
-                    200, json={"promptFeedback": {"blockReason": "SAFETY"}}
-                ))
+                "transport": httpx.MockTransport(respond)
             }),
         )
         model = ModelConfig(
@@ -158,6 +297,8 @@ class GeminiChatTests(unittest.TestCase):
             result = test_model_connection()
         self.assertFalse(result["success"])
         self.assertIn("SAFETY", result["error"])
+        self.assertEqual(len(requests), 1)
+        self.assertNotIn("maxOutputTokens", requests[0].get("generationConfig", {}))
         client.close()
 
 
@@ -211,6 +352,27 @@ class ReadOnlyQueryTests(unittest.TestCase):
 
         self.assertIn("отклонён", result)
         connect.assert_not_called()
+
+    @patch("jarvis_backend.database_config", return_value={})
+    @patch("jarvis_backend.pymssql.connect")
+    def test_query_result_is_capped_before_being_sent_to_the_model(
+        self, connect, _database_config
+    ):
+        cursor = MagicMock()
+        cursor.description = [("value",)]
+        cursor.fetchmany.return_value = [("x" * (MAX_QUERY_RESULT_CHARS + 1),)]
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value = cursor
+        connect.return_value = connection
+
+        result = json.loads(execute_read_only_query("SELECT value FROM data"))
+
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["data"], [])
+        self.assertLessEqual(
+            len(json.dumps(result, ensure_ascii=False)), MAX_QUERY_RESULT_CHARS
+        )
+        _database_config.assert_called_once_with()
 
 
 class OmnirouteToolTests(unittest.TestCase):
@@ -293,6 +455,72 @@ class DdlExecutionTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_streamlit_root_secrets_supply_managed_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "secrets.toml"
+            path.write_text(
+                'JARVIS_MANAGED_CONFIG = "true"\n'
+                'DB_HOST = "db.example"\n'
+                'DB_NAME = "analytics"\n'
+                'DB_USER = "reader"\n'
+                'DB_PASSWORD = "test-password"\n'
+                'GEMINI_API_KEY = "test-key"\n'
+                'GEMINI_MODEL = "gemini-test"\n'
+                'SUPERSET_MCP_ENABLED = "true"\n'
+                'SUPERSET_MCP_URL = "https://superset.example/mcp"\n'
+            )
+            with patch.dict(os.environ, {}, clear=True), patch(
+                "streamlit.runtime.secrets.config.get_option", return_value=[str(path)]
+            ), patch.object(
+                config_manager_module, "CONFIG_FILE", Path(directory) / "missing.json"
+            ), patch.object(
+                Secrets, "_maybe_install_file_watchers"
+            ):
+                secrets = Secrets()
+                self.assertTrue(secrets.load_if_toml_exists())
+                manager = ConfigManager()
+                self.assertIsNotNone(manager.get_database_config())
+                self.assertIsNotNone(manager.get_model_config())
+                self.assertTrue(manager.get_superset_mcp_config().enabled)
+                self.assertFalse(manager.is_ui_config_enabled())
+
+    def test_managed_config_uses_shared_environment_not_saved_settings(self):
+        environment = {
+            "JARVIS_MANAGED_CONFIG": "true",
+            "ALLOW_DB_CONFIG_UI": "true",
+            "DB_HOST": "db.example",
+            "DB_NAME": "analytics",
+            "DB_USER": "reader",
+            "DB_PASSWORD": "test-db-password",
+            "GEMINI_API_KEY": "test-gemini-key",
+            "GEMINI_MODEL": "gemini-test",
+            "OMNIROUTE_API_KEY": "unused-omniroute-key",
+            "SUPERSET_MCP_ENABLED": "true",
+            "SUPERSET_MCP_URL": "https://superset.example/mcp",
+            "SUPERSET_MCP_BEARER_TOKEN": "test-token",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            config_file = Path(directory) / "config.json"
+            config_file.write_text(json.dumps({
+                "database": {
+                    "host": "old-db", "port": 1433, "name": "old",
+                    "user": "old", "password": "old",
+                },
+                "model": {"provider": "gemini", "model_name": "old", "api_key": "old"},
+                "superset_mcp": {
+                    "enabled": False, "endpoint_url": "", "bearer_token": "",
+                },
+            }))
+            with patch.object(config_manager_module, "CONFIG_FILE", config_file), \
+                 patch.dict(os.environ, environment, clear=True):
+                manager = ConfigManager()
+                self.assertEqual(manager.get_database_config().host, "db.example")
+                self.assertEqual(manager.get_model_config().provider, "gemini")
+                self.assertEqual(manager.get_model_config().model_name, "gemini-test")
+                self.assertTrue(manager.get_superset_mcp_config().enabled)
+                self.assertEqual(manager.get_superset_mcp_config().bearer_token, "test-token")
+                self.assertFalse(manager.is_ui_config_enabled())
+
     def test_database_config_uses_pymssql_connection_fields(self):
         connection_settings = DatabaseConfig(
             host="db.example",
@@ -374,10 +602,33 @@ class StreamlitGeminiKeyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config_file = Path(directory) / "config.json"
             with patch.object(config_manager_module, "CONFIG_FILE", config_file):
-                with patch.dict(os.environ, {"ALLOW_DB_CONFIG_UI": "true"}, clear=True):
-                    with patch.object(app_config_manager, "_db_config", None), \
-                         patch.object(app_config_manager, "_model_config", None), \
-                         patch.object(app_config_manager, "set_model_config") as save_model:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "ALLOW_DB_CONFIG_UI": "true",
+                        "JARVIS_DISABLE_SUPERSET_MCP": "true",
+                    },
+                    clear=True,
+                ):
+                    with patch.object(
+                        app_config_manager, "get_database_config", return_value=None
+                    ), \
+                        patch.object(
+                        app_config_manager, "get_model_config", return_value=None
+                    ), \
+                        patch.object(
+                            app_config_manager,
+                            "get_superset_mcp_config",
+                            return_value=SupersetMCPConfig(),
+                        ), \
+                        patch.object(
+                            app_config_manager, "set_model_config"
+                        ) as save_model, patch(
+                            "superset_mcp.superset_mcp_manager.get_toolset",
+                            side_effect=SupersetMCPError(
+                                "Superset test connection disabled"
+                            ),
+                        ):
                         app = AppTest.from_file(str(app_path)).run()
                         self.assertFalse(app.exception)
 

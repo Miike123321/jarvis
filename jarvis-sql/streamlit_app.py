@@ -1,18 +1,28 @@
+import json
 import logging
 import os
 import re
+import sqlite3
+import subprocess
 
 import pymssql
 import streamlit as st
 
 logger = logging.getLogger("jarvis")
 
-from config_manager import DatabaseConfig, ModelConfig, PLACEHOLDER_API_KEY
+from config_manager import (
+    DatabaseConfig,
+    ModelConfig,
+    PLACEHOLDER_API_KEY,
+    SupersetMCPConfig,
+)
 from jarvis_backend import (
     GEMINI_MODEL,
     GeminiChat,
     GeminiResponseError,
     MAX_MESSAGE_LENGTH,
+    MAX_OMNIROUTE_TOOL_CALLS,
+    MAX_OMNIROUTE_TOOL_ROUNDS,
     create_chat,
     database_config,
     execute_ddl_statement,
@@ -20,9 +30,16 @@ from jarvis_backend import (
     config_manager,
     test_model_connection,
 )
+from superset_mcp import (
+    SUPERSET_REQUESTED_PERMISSIONS,
+    SupersetMCPError,
+    superset_mcp_manager,
+)
+from versioning import get_version
 
 
 SQL_FENCE = re.compile(r"```sql\s*([\s\S]*?)```", re.IGNORECASE)
+ASSET_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 REQUIRED_SETTINGS = (
     "GEMINI_API_KEY",
     "DB_HOST",
@@ -30,6 +47,39 @@ REQUIRED_SETTINGS = (
     "DB_USER",
     "DB_PASSWORD",
 )
+READ_ONLY_SUPERSET_TOOLS = frozenset(
+    {
+        "health_check",
+        "get_instance_info",
+        "get_schema",
+        "list_databases",
+        "get_database_info",
+        "list_datasets",
+        "get_dataset_info",
+        "query_dataset",
+        "list_charts",
+        "get_chart_info",
+        "get_chart_data",
+        "get_chart_preview",
+        "get_chart_sql",
+        "get_chart_type_schema",
+        "generate_explore_link",
+        "list_dashboards",
+        "get_dashboard_info",
+        "get_dashboard_data",
+        "execute_sql",
+        "open_sql_lab_with_context",
+    }
+)
+PREBUILT_SCENARIOS = {
+    "superset_find": "Superset: найти доступные данные и объекты",
+    "superset_inspect": "Superset: изучить график, дашборд или датасет",
+    "superset_add_chart": "Superset: добавить график в выбранный дашборд",
+    "superset_create_dashboard": "Superset: создать дашборд по шаблону",
+    "sql_question": "SQL: ответить на вопрос по данным",
+    "sql_table": "SQL: проверить структуру таблицы",
+    "sql_compare": "SQL: сравнить показатели",
+}
 
 st.set_page_config(
     page_title="J.A.R.V.I.S. SQL Assistant",
@@ -61,6 +111,19 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+try:
+    app_version = get_version()
+except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as exc:
+    logger.warning("Cannot determine application version: %s", type(exc).__name__)
+    st.warning("Не удалось определить версию приложения. Проверьте Git и данные версии.")
+else:
+    st.markdown(
+        f'<div style="position:fixed;bottom:0.6rem;right:0.8rem;'
+        f'z-index:999;background:#111c2a;color:#aab8ca;padding:0.2rem 0.5rem;'
+        f'border-radius:0.4rem;font-size:0.75rem">v{app_version}</div>',
+        unsafe_allow_html=True,
+    )
+
 
 def initialize_session() -> None:
     defaults = {
@@ -77,6 +140,12 @@ def initialize_session() -> None:
         "_model_options": None,
         "_model_selector_shown": False,
         "_last_chat_provider": None,
+        "preset_dashboard_choices": {},
+        "preset_chart_choices": {},
+        "preset_dashboard_attempted": False,
+        "preset_chart_attempted": False,
+        "preset_dashboard_error": None,
+        "preset_chart_error": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -107,6 +176,224 @@ def queue_draft() -> None:
     st.session_state["queued_messages"].append(text)
     st.session_state["draft_message"] = ""
     st.session_state["draft_error"] = None
+
+
+def extract_superset_asset_choices(
+    payload: object,
+    *,
+    id_keys: tuple[str, ...],
+    label_keys: tuple[str, ...],
+) -> dict[str, str]:
+    """Extract selectable asset IDs and labels from a Superset MCP result."""
+    choices: dict[str, str] = {}
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            identifier = next(
+                (
+                    value[key]
+                    for key in id_keys
+                    if key in value and isinstance(value[key], (str, int))
+                ),
+                None,
+            )
+            label = next(
+                (
+                    value[key]
+                    for key in label_keys
+                    if key in value and isinstance(value[key], str) and value[key].strip()
+                ),
+                None,
+            )
+            if identifier is not None and label is not None:
+                choices[str(identifier)] = f"{label.strip()} (ID: {identifier})"
+            for nested in value.values():
+                visit(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                visit(nested)
+
+    visit(payload)
+    return choices
+
+
+def load_superset_asset_choices(tool_name: str, asset_kind: str) -> dict[str, str]:
+    """Load a dropdown list only when the MCP tool can be called without guessed arguments."""
+    toolset = superset_mcp_manager.get_toolset(
+        config_manager.get_superset_mcp_config()
+    )
+    metadata = next(
+        (tool for tool in toolset.tools if tool.get("name") == tool_name), None
+    )
+    if metadata is None:
+        raise SupersetMCPError(
+            f"Сервер Superset не предоставляет инструмент {tool_name}."
+        )
+
+    schema = metadata.get("inputSchema")
+    if not isinstance(schema, dict):
+        raise SupersetMCPError(f"Сервер не предоставил схему инструмента {tool_name}.")
+    properties = schema.get("properties", {})
+    request_schema = properties.get("request", {}) if isinstance(properties, dict) else {}
+    if not isinstance(request_schema, dict):
+        request_schema = {}
+    variants = request_schema.get("anyOf", [request_schema])
+    request_objects = []
+    for variant in variants if isinstance(variants, list) else []:
+        if not isinstance(variant, dict):
+            continue
+        reference = variant.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            definitions = schema.get("$defs", {})
+            variant = (
+                definitions.get(reference.removeprefix("#/$defs/"), {})
+                if isinstance(definitions, dict)
+                else {}
+            )
+        if isinstance(variant, dict) and variant.get("type") == "object":
+            request_objects.append(variant)
+
+    required = schema.get("required", [])
+    arguments: dict = {}
+    if required:
+        empty_request_allowed = any(
+            not item.get("required")
+            and not item.get("minProperties")
+            and not any(key in item for key in ("allOf", "oneOf", "not", "if", "const", "enum"))
+            for item in request_objects
+        )
+        if required == ["request"] and empty_request_allowed:
+            arguments["request"] = {}
+        else:
+            raise SupersetMCPError(
+                f"Нельзя безопасно загрузить список: {tool_name} требует параметры "
+                "из схемы сервера. Используйте свободный чат для просмотра объектов."
+            )
+
+    def read_page(arguments: dict) -> object:
+        result_text = toolset.invoke(tool_name, arguments)
+        try:
+            return json.loads(result_text)
+        except json.JSONDecodeError as exc:
+            raise SupersetMCPError(
+                f"Не удалось загрузить список {asset_kind} из Superset. "
+                "Проверьте права пользователя и ответ MCP-сервера."
+            ) from exc
+
+    payload = read_page(arguments)
+    pages = [payload]
+    total_pages = payload.get("total_pages") if isinstance(payload, dict) else None
+    if total_pages is not None:
+        if not isinstance(total_pages, int) or isinstance(total_pages, bool) or total_pages < 0:
+            raise SupersetMCPError("Superset вернул некорректное число страниц.")
+        if total_pages > 100:
+            raise SupersetMCPError(
+                f"Список {asset_kind} слишком большой: более 100 страниц."
+            )
+        if total_pages > 1:
+            page_supported = False
+            for variant in request_objects:
+                page_schema = variant.get("properties", {}).get("page", {})
+                maximum = page_schema.get("maximum") if isinstance(page_schema, dict) else None
+                if (
+                    isinstance(page_schema, dict)
+                    and page_schema.get("type") == "integer"
+                    and page_schema.get("default") == 1
+                    and (
+                        maximum is None
+                        or (isinstance(maximum, (int, float)) and maximum >= total_pages)
+                    )
+                ):
+                    page_supported = True
+                    break
+            if not page_supported:
+                raise SupersetMCPError(
+                    f"Список {asset_kind} содержит несколько страниц, но схема "
+                    "MCP-сервера не позволяет безопасно загрузить остальные."
+                )
+            for page in range(2, total_pages + 1):
+                pages.append(read_page({"request": {"page": page}}))
+
+    if asset_kind == "дашбордов":
+        id_keys = ("dashboard_id", "id", "uuid")
+        label_keys = ("dashboard_title", "title", "name")
+    else:
+        id_keys = ("chart_id", "id", "uuid")
+        label_keys = ("chart_title", "slice_name", "title", "name")
+    choices: dict[str, str] = {}
+    for index, page in enumerate(pages, start=1):
+        page_choices = extract_superset_asset_choices(
+            page, id_keys=id_keys, label_keys=label_keys
+        )
+        if not page_choices and len(pages) > 1:
+            raise SupersetMCPError(
+                f"Страница {index} списка {asset_kind} пуста или содержит ошибку. "
+                "Обновите список."
+            )
+        choices.update(page_choices)
+    if not choices:
+        raise SupersetMCPError(
+            f"Superset не вернул идентификаторы и названия {asset_kind}."
+        )
+    return choices
+
+
+def refresh_superset_asset_choices(kind: str) -> None:
+    if kind == "dashboard":
+        tool_name, asset_kind = "list_dashboards", "дашбордов"
+    else:
+        tool_name, asset_kind = "list_charts", "графиков"
+    st.session_state[f"preset_{kind}_attempted"] = True
+    try:
+        choices = load_superset_asset_choices(tool_name, asset_kind)
+    except SupersetMCPError as exc:
+        st.session_state[f"preset_{kind}_choices"] = {}
+        st.session_state[f"preset_{kind}_error"] = str(exc)
+    else:
+        st.session_state[f"preset_{kind}_choices"] = choices
+        st.session_state[f"preset_{kind}_error"] = None
+
+
+def submit_prebuilt_scenario(
+    prompt: str,
+    *,
+    allowed_superset_tools: frozenset[str] = frozenset(),
+    include_database_tool: bool = True,
+    max_tool_calls: int = 2,
+    max_tool_rounds: int = 2,
+    max_mutating_calls: int | None = 0,
+    policy_description: str = "",
+    required_superset_tools: frozenset[str] = frozenset(),
+    selected_add_chart_ids: tuple[str, str] | None = None,
+) -> None:
+    """Run one isolated, tool-scoped workflow and append its result to the chat."""
+    scenario_chat = create_chat(
+        allowed_superset_tools=allowed_superset_tools,
+        include_database_tool=include_database_tool,
+        max_tool_calls=max_tool_calls,
+        max_tool_rounds=max_tool_rounds,
+        max_mutating_calls=max_mutating_calls,
+        policy_description=policy_description,
+        require_superset_tools=bool(allowed_superset_tools),
+        required_superset_tools=required_superset_tools,
+        selected_add_chart_ids=selected_add_chart_ids,
+    )
+    try:
+        response = scenario_chat.send_message(prompt)
+        answer = getattr(response, "text", None)
+        if not isinstance(answer, str) or not answer.strip():
+            raise RuntimeError("Модель не вернула текстовый ответ.")
+    finally:
+        close = getattr(scenario_chat, "close", None)
+        if callable(close):
+            close()
+
+    st.session_state["messages"].extend(
+        [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": answer},
+        ]
+    )
 
 
 def show_message(message: dict[str, str]) -> None:
@@ -288,6 +575,464 @@ def show_config_ui() -> None:
                         st.success("✅ Gemini API-ключ сохранён.")
                         st.rerun()
 
+        st.divider()
+        st.subheader("Apache Superset MCP")
+        current_superset = config_manager.get_superset_mcp_config()
+        with st.expander("Права для пользователя Superset"):
+            st.caption(
+                "Это RBAC-права Superset, а не MCP-инструменты. Попросите "
+                "администратора назначить их роли/пользователю, под которым "
+                "работает MCP-сервер. Jarvis не меняет права Superset. "
+                "Выдавайте write- и data-access права только в нужном объёме."
+            )
+            st.code("\n".join(SUPERSET_REQUESTED_PERMISSIONS))
+            st.caption(
+                "`can_read on Chart` указано вместо опечатки `an_read on Chart`. "
+                "Наличие `can_format_sql` и `can_estimate_query_cost` зависит от "
+                "версии и конфигурации Superset."
+            )
+        if current_superset.bearer_token:
+            st.caption("Bearer-токен сохранён; оставьте поле пустым, чтобы не менять его.")
+
+        def save_superset_configuration() -> None:
+            current = config_manager.get_superset_mcp_config()
+            enabled = st.session_state.get("superset_mcp_enabled_input", False)
+            endpoint = st.session_state.get("superset_mcp_endpoint_input", "").strip()
+            if enabled and not endpoint:
+                st.session_state["superset_mcp_save_error"] = (
+                    "Укажите endpoint MCP-сервера Superset."
+                )
+                return
+
+            entered_token = st.session_state.get("superset_mcp_token_input", "").strip()
+            bearer_token = (
+                ""
+                if st.session_state.get("superset_mcp_remove_token_input", False)
+                else entered_token or current.bearer_token
+            )
+            try:
+                config_manager.set_superset_mcp_config(
+                    SupersetMCPConfig(
+                        enabled=enabled,
+                        endpoint_url=endpoint,
+                        bearer_token=bearer_token,
+                    )
+                )
+                superset_mcp_manager.close()
+                st.session_state["preset_dashboard_choices"] = {}
+                st.session_state["preset_chart_choices"] = {}
+                st.session_state["preset_dashboard_attempted"] = False
+                st.session_state["preset_chart_attempted"] = False
+                st.session_state["preset_dashboard_error"] = None
+                st.session_state["preset_chart_error"] = None
+                reset_model_session()
+            except Exception as exc:
+                st.session_state["superset_mcp_save_error"] = (
+                    f"Не удалось сохранить настройки Superset MCP: {exc}"
+                )
+            else:
+                st.session_state["superset_mcp_save_success"] = True
+                st.session_state["superset_mcp_token_input"] = ""
+
+        with st.form("superset_mcp_config_form", clear_on_submit=True):
+            st.checkbox(
+                "Включить интеграцию Superset MCP",
+                value=current_superset.enabled,
+                key="superset_mcp_enabled_input",
+            )
+            st.text_input(
+                "Streamable HTTP MCP endpoint",
+                value=current_superset.endpoint_url,
+                placeholder="Введите точный URL, предоставленный администратором Superset",
+                key="superset_mcp_endpoint_input",
+            )
+            st.text_input(
+                "Bearer-токен (если требуется сервером)",
+                type="password",
+                placeholder="Оставьте пустым, чтобы сохранить текущий",
+                key="superset_mcp_token_input",
+            )
+            st.checkbox(
+                "Удалить сохранённый Bearer-токен",
+                value=False,
+                key="superset_mcp_remove_token_input",
+            )
+            st.form_submit_button(
+                "Сохранить настройки Superset MCP",
+                use_container_width=True,
+                on_click=save_superset_configuration,
+            )
+
+        save_error = st.session_state.pop("superset_mcp_save_error", None)
+        if save_error:
+            st.error(save_error)
+        if st.session_state.pop("superset_mcp_save_success", False):
+            st.success("Настройки Superset MCP сохранены.")
+
+        if st.button(
+            "Проверить подключение к Superset MCP",
+            use_container_width=True,
+            key="test_superset_mcp_connection",
+        ):
+            try:
+                with st.spinner("Проверяю MCP endpoint и доступные инструменты..."):
+                    result = superset_mcp_manager.test_connection(
+                        config_manager.get_superset_mcp_config()
+                    )
+                st.success(
+                    f"Соединение установлено; доступно инструментов Superset: "
+                    f"{result['tool_count']}."
+                )
+                if result["health_check_passed"]:
+                    st.caption("Проверка health_check Superset прошла успешно.")
+                if result["missing_tools"]:
+                    st.info(
+                        "Часть возможностей недоступна на этом сервере или для "
+                        "этого пользователя: "
+                        + ", ".join(result["missing_tools"])
+                    )
+            except SupersetMCPError as exc:
+                st.error(str(exc))
+
+        if not current_superset.enabled:
+            st.caption("Интеграция отключена.")
+        elif superset_mcp_manager.last_error:
+            st.warning(superset_mcp_manager.last_error)
+        elif superset_mcp_manager.last_tool_names:
+            st.success(
+                f"Подключено; доступно инструментов: "
+                f"{len(superset_mcp_manager.last_tool_names)}."
+            )
+        else:
+            st.caption("Подключение будет проверено при вызове инструментов.")
+
+
+def show_prebuilt_workflows() -> None:
+    """Render bounded SQL/Superset workflows alongside the unrestricted text box."""
+    st.divider()
+    st.subheader("Готовые сценарии")
+    st.caption(
+        "Сценарии отправляют короткий запрос в отдельном контексте и открывают "
+        "только нужные инструменты. В свободном чате Superset доступен только "
+        "для чтения; постоянные изменения запускаются через подтверждённые формы."
+    )
+    scenario = st.selectbox(
+        "Выберите задачу",
+        options=list(PREBUILT_SCENARIOS),
+        format_func=PREBUILT_SCENARIOS.get,
+        key="prebuilt_scenario",
+    )
+
+    object_kind = None
+    if scenario == "superset_inspect":
+        object_kind = st.selectbox(
+            "Тип объекта",
+            options=["график", "дашборд", "датасет"],
+            key="preset_superset_object_kind",
+        )
+
+    if scenario == "superset_add_chart" or object_kind == "дашборд":
+        if st.button(
+            "Обновить список дашбордов",
+            key="refresh_preset_dashboards",
+            use_container_width=True,
+        ) or not st.session_state["preset_dashboard_attempted"]:
+            refresh_superset_asset_choices("dashboard")
+        if st.session_state["preset_dashboard_error"]:
+            st.error(st.session_state["preset_dashboard_error"])
+
+    if scenario == "superset_add_chart":
+        if st.button(
+            "Обновить список графиков",
+            key="refresh_preset_charts",
+            use_container_width=True,
+        ) or not st.session_state["preset_chart_attempted"]:
+            refresh_superset_asset_choices("chart")
+        if st.session_state["preset_chart_error"]:
+            st.error(st.session_state["preset_chart_error"])
+
+    prompt = ""
+    allowed_tools = frozenset()
+    required_tools = frozenset()
+    selected_add_chart_ids = None
+    include_database_tool = True
+    max_tool_calls = 2
+    max_tool_rounds = 2
+    max_mutating_calls = 0
+    policy = "Выполни только выбранную задачу; не создавай и не изменяй объекты."
+    confirmed = True
+    valid = True
+
+    with st.form(f"prebuilt_form_{scenario}"):
+        if scenario == "sql_question":
+            question = st.text_area(
+                "Что нужно узнать из базы?",
+                max_chars=900,
+                key="preset_sql_question",
+                placeholder="Например: сколько заказов было по месяцам за последний год?",
+            ).strip()
+            valid = bool(question)
+            prompt = (
+                "Ответь на вопрос по настроенной Microsoft SQL Server. "
+                "Используй только read-only SELECT и выполни максимум один запрос. "
+                "Не предлагай DDL или другие изменения. Вопрос пользователя:\n"
+                + question
+            )
+            max_tool_calls = 1
+            max_tool_rounds = 1
+        elif scenario == "sql_table":
+            schema_name = st.text_input(
+                "Схема таблицы",
+                value="dbo",
+                max_chars=128,
+                key="preset_sql_schema",
+            ).strip()
+            table_name = st.text_input(
+                "Таблица",
+                max_chars=128,
+                key="preset_sql_table",
+                placeholder="Например: Orders",
+            ).strip()
+            valid = bool(
+                ASSET_IDENTIFIER.fullmatch(schema_name)
+                and ASSET_IDENTIFIER.fullmatch(table_name)
+            )
+            prompt = (
+                f"Проверь структуру таблицы {schema_name}.{table_name} в настроенной "
+                "Microsoft SQL Server. Используй максимум один безопасный SELECT "
+                "к INFORMATION_SCHEMA или sys-метаданным. Ничего не изменяй."
+            )
+            max_tool_calls = 1
+            max_tool_rounds = 1
+        elif scenario == "sql_compare":
+            comparison = st.text_area(
+                "Какие показатели сравнить?",
+                max_chars=900,
+                key="preset_sql_compare",
+                placeholder="Например: сравни выручку и количество заказов по кварталам.",
+            ).strip()
+            valid = bool(comparison)
+            prompt = (
+                "Сравни показатели в настроенной Microsoft SQL Server. Сначала "
+                "найди подходящие таблицы только read-only SELECT-запросами, затем "
+                "выполни сравнение; максимум два вызова SQL-инструмента. "
+                "Не предлагай и не выполняй изменения.\nЗадача:\n"
+                + comparison
+            )
+            max_tool_calls = 2
+            max_tool_rounds = 2
+        elif scenario == "superset_find":
+            search = st.text_input(
+                "Что найти в Superset?",
+                max_chars=500,
+                key="preset_superset_search",
+                placeholder="Например: датасеты и дашборды по продажам",
+            ).strip()
+            valid = bool(search)
+            allowed_tools = frozenset(
+                {"list_databases", "list_datasets", "list_charts", "list_dashboards"}
+            )
+            include_database_tool = False
+            max_tool_calls = 3
+            max_tool_rounds = 3
+            policy = "Только поиск/просмотр. Не выполняй SQL и не изменяй объекты."
+            prompt = (
+                "Найди в Superset доступные базы, датасеты, графики или дашборды "
+                "по теме ниже. Используй только результаты инструментов, не "
+                "запускай SQL и не создавай объекты. Запрос:\n" + search
+            )
+        elif scenario == "superset_inspect":
+            if object_kind == "дашборд":
+                dashboards = st.session_state["preset_dashboard_choices"]
+                object_reference = st.selectbox(
+                    "Название дашборда",
+                    options=list(dashboards) or [""],
+                    format_func=lambda value: dashboards.get(
+                        value, "Нет доступных дашбордов"
+                    ),
+                    key="preset_inspect_dashboard_id",
+                )
+            else:
+                object_reference = st.text_input(
+                    "Название или ID объекта",
+                    max_chars=300,
+                    key="preset_superset_object_reference",
+                ).strip()
+            valid = bool(object_reference)
+            if object_kind == "дашборд":
+                allowed_tools = frozenset(
+                    {"list_dashboards", "get_dashboard_info", "get_dashboard_data",
+                     "get_chart_info", "get_chart_data"}
+                )
+                required_tools = frozenset({"get_dashboard_info"})
+            elif object_kind == "график":
+                allowed_tools = frozenset(
+                    {"list_charts", "get_chart_info", "get_chart_data",
+                     "get_chart_preview", "get_chart_sql"}
+                )
+                required_tools = frozenset({"get_chart_info"})
+            else:
+                allowed_tools = frozenset(
+                    {"list_datasets", "get_dataset_info", "get_schema"}
+                )
+                required_tools = frozenset({"get_dataset_info"})
+            include_database_tool = False
+            max_tool_calls = 3
+            max_tool_rounds = 3
+            policy = "Только просмотр выбранного объекта; ничего не сохраняй и не изменяй."
+            prompt = (
+                f"Изучи {object_kind} Superset с названием или ID "
+                f"{object_reference!r}. Вызови доступный инструмент просмотра "
+                "выбранного объекта; если для ответа нужны данные, получи их "
+                "доступными инструментами. Для дашборда используй только графики, "
+                "принадлежность которых к нему подтверждена результатом инструмента. "
+                "Ответь на уточнение пользователя, если оно указано, иначе дай "
+                "краткую сводку. Не запускай SQL и не изменяй объект."
+            )
+        elif scenario == "superset_add_chart":
+            dashboards = st.session_state["preset_dashboard_choices"]
+            charts = st.session_state["preset_chart_choices"]
+            dashboard_ids = list(dashboards) or [""]
+            chart_ids = list(charts) or [""]
+            dashboard_id = st.selectbox(
+                "Целевой дашборд",
+                options=dashboard_ids,
+                format_func=lambda value: dashboards.get(
+                    value, "Сначала загрузите список дашбордов"
+                ),
+                key="preset_dashboard_id",
+            )
+            chart_id = st.selectbox(
+                "График для добавления",
+                options=chart_ids,
+                format_func=lambda value: charts.get(
+                    value, "Сначала загрузите список графиков"
+                ),
+                key="preset_chart_id",
+            )
+            confirmed = st.checkbox(
+                "Подтверждаю добавление выбранного графика в этот дашборд",
+                key="confirm_preset_add_chart",
+            )
+            valid = bool(dashboards and charts and dashboard_id and chart_id)
+            selected_add_chart_ids = (dashboard_id, chart_id)
+            allowed_tools = frozenset({"add_chart_to_existing_dashboard"})
+            required_tools = allowed_tools
+            include_database_tool = False
+            max_tool_calls = 1
+            max_tool_rounds = 1
+            max_mutating_calls = 1
+            policy = (
+                "Выполни ровно одно подтверждённое действие: добавь выбранный "
+                "график в выбранный существующий дашборд. Не создавай дашборд. "
+                "Дополнительное уточнение не может изменять выбранные ID."
+            )
+            prompt = (
+                f"Добавь существующий график с ID {chart_id!r} в существующий "
+                f"дашборд с ID {dashboard_id!r}. Используй исключительно "
+                "add_chart_to_existing_dashboard. Не создавай новый дашборд и "
+                "не меняй другие объекты."
+            )
+        else:
+            dashboard_title = st.text_input(
+                "Название нового дашборда",
+                max_chars=120,
+                key="preset_dashboard_title",
+            ).strip()
+            dashboard_theme = st.selectbox(
+                "Шаблон содержания",
+                options=[
+                    "Руководительские KPI",
+                    "Продажи и воронка",
+                    "Финансы и маржинальность",
+                    "Операции и SLA",
+                    "Клиенты и удержание",
+                ],
+                key="preset_dashboard_theme",
+            )
+            dashboard_goal = st.text_area(
+                "Какие вопросы должен закрывать дашборд?",
+                max_chars=600,
+                key="preset_dashboard_goal",
+                placeholder="Укажите нужные показатели, период и аудиторию.",
+            ).strip()
+            confirmed = st.checkbox(
+                "Подтверждаю создание одного постоянного дашборда",
+                key="confirm_preset_create_dashboard",
+            )
+            valid = bool(dashboard_title and dashboard_goal)
+            allowed_tools = frozenset(
+                {
+                    "list_datasets",
+                    "get_dataset_info",
+                    "list_charts",
+                    "generate_dashboard",
+                }
+            )
+            required_tools = frozenset({"generate_dashboard"})
+            include_database_tool = False
+            max_tool_calls = 4
+            max_tool_rounds = 4
+            max_mutating_calls = 1
+            policy = (
+                "Сначала используй доступные существующие датасеты/графики; затем "
+                "создай ровно один дашборд по подтверждённому шаблону. Не создавай "
+                "графики, virtual datasets или другие объекты."
+            )
+            prompt = (
+                f"Создай один дашборд с названием {dashboard_title!r}. "
+                f"Шаблон содержания: {dashboard_theme}. Цель и показатели: "
+                f"{dashboard_goal}. Сначала проверь доступные датасеты и графики; "
+                "используй только то, что вернули инструменты. Создание уже "
+                "подтверждено пользователем. Не создавай другие объекты."
+            )
+
+        extra_request = st.text_area(
+            "Что именно нужно сделать? Дополнительное уточнение",
+            max_chars=900,
+            key=f"preset_extra_request_{scenario}",
+            placeholder="Например: покажи показатели за последний месяц.",
+        ).strip()
+        if extra_request:
+            prompt += (
+                "\nДополнительное уточнение пользователя (только в рамках "
+                "выбранного сценария и разрешённых действий):\n" + extra_request
+            )
+
+        submitted = st.form_submit_button(
+            "Запустить выбранный сценарий",
+            type="primary",
+            disabled=not st.session_state.get("model_test_passed", False),
+        )
+
+    if submitted:
+        if not valid:
+            st.error("Заполните обязательные поля корректными значениями.")
+        elif not confirmed:
+            st.warning("Для постоянного изменения отметьте явное подтверждение.")
+        elif len(prompt) > MAX_MESSAGE_LENGTH:
+            st.error(f"Сценарий превышает лимит {MAX_MESSAGE_LENGTH} символов.")
+        elif scenario.startswith("sql_") and not config_manager.get_database_config():
+            st.error("Настройте подключение к Microsoft SQL Server.")
+        else:
+            try:
+                with st.spinner("Выполняю ограниченный сценарий..."):
+                    submit_prebuilt_scenario(
+                        prompt,
+                        allowed_superset_tools=allowed_tools,
+                        include_database_tool=include_database_tool,
+                        max_tool_calls=max_tool_calls,
+                        max_tool_rounds=max_tool_rounds,
+                        max_mutating_calls=max_mutating_calls,
+                        policy_description=policy,
+                        required_superset_tools=required_tools,
+                        selected_add_chart_ids=selected_add_chart_ids,
+                    )
+                st.rerun()
+            except Exception as exc:
+                logger.exception("Prebuilt workflow failed")
+                st.error(f"Сценарий не выполнен: {exc}")
+
 
 initialize_session()
 
@@ -367,12 +1112,44 @@ if st.session_state["chat"] is None and (db_configured and model_configured):
 
         if current_provider != saved_provider:
             logger.info(f"Provider changed from {saved_provider} to {current_provider}, resetting chat")
-            st.session_state["chat"] = create_chat()
+            st.session_state["chat"] = create_chat(
+                allowed_superset_tools=READ_ONLY_SUPERSET_TOOLS,
+                max_tool_calls=MAX_OMNIROUTE_TOOL_CALLS,
+                max_tool_rounds=MAX_OMNIROUTE_TOOL_ROUNDS,
+                max_mutating_calls=0,
+                policy_description=(
+                    "Это свободный чат Streamlit с доступом Superset только для "
+                    "чтения. Инструменты постоянных изменений недоступны; "
+                    "предложи пользователю соответствующий готовый сценарий."
+                ),
+            )
             st.session_state["_last_chat_provider"] = current_provider
         else:
-            st.session_state["chat"] = create_chat()
+            st.session_state["chat"] = create_chat(
+                allowed_superset_tools=READ_ONLY_SUPERSET_TOOLS,
+                max_tool_calls=MAX_OMNIROUTE_TOOL_CALLS,
+                max_tool_rounds=MAX_OMNIROUTE_TOOL_ROUNDS,
+                max_mutating_calls=0,
+                policy_description=(
+                    "Это свободный чат Streamlit с доступом Superset только для "
+                    "чтения. Инструменты постоянных изменений недоступны; "
+                    "предложи пользователю соответствующий готовый сценарий."
+                ),
+            )
     except Exception as exc:
         st.session_state["chat_error"] = str(exc)
+
+superset_status = config_manager.get_superset_mcp_config()
+if superset_status.enabled and superset_mcp_manager.last_error:
+    st.warning(
+        "Superset MCP сейчас недоступен; обычный чат продолжает работать без "
+        f"этой интеграции. {superset_mcp_manager.last_error}"
+    )
+elif superset_status.enabled and superset_mcp_manager.last_tool_names:
+    st.info(
+        f"Superset MCP подключён; доступно инструментов: "
+        f"{len(superset_mcp_manager.last_tool_names)}."
+    )
 
 if st.session_state["chat_error"]:
     st.error(st.session_state["chat_error"])
@@ -384,8 +1161,11 @@ if not st.session_state["messages"]:
     with st.chat_message("assistant"):
         st.markdown(
             "Здравствуйте! Добавьте одну или несколько частей задачи, "
-            "затем отправьте их одним запросом."
+            "затем отправьте их одним запросом. Для типовых операций используйте "
+            "готовые сценарии ниже."
         )
+
+show_prebuilt_workflows()
 
 st.subheader("Черновик запроса")
 with st.form("draft_form", clear_on_submit=False):

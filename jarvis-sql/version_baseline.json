@@ -1,0 +1,17 @@
+{
+  "release": 1,
+  "files": {
+    ".devcontainer/devcontainer.json": "53c8cba7301806b76344e19acc67cf718ca453741e41b83d5d223c5d23b33273",
+    ".env.example": "620c86f051bb81d7b4cadc8c1878d67a788010c56423e00a3ad201b17c691fa7",
+    ".gitignore": "e6cfaf9cdc521df3bff4ba9bbdba3dd0a09d9741e9e94c6b58142c5c59fce0fe",
+    "README.md": "2ac2892bd2756202839f988f9d356253c529ad49144cb133625528ec1fd935f7",
+    "config_manager.py": "0e3ef6ca35b6127fae13d22310d068f2d69055e19e67d0f79d3d674de7a82f16",
+    "index.html": "ba8e03603471cf63568f5f5aa530f5badf2187cc3a7e725a332963cc212948ee",
+    "jarvis_backend.py": "898bf64fdabcef8c52bf7eeda2b31716272ecc662d6f135482c9492d195db6cd",
+    "requirements.txt": "1db54ceb91cb10d63e5bfbaab6615c89cf954b48127ac5168988076ff1aed9fa",
+    "streamlit_app.py": "a52eaf0cd2ec843d09086e809ff876e8ffde449f10e1a974a9ce11f1e4eb659a",
+    "superset_mcp.py": "4f6344670c2a8f3ca9fd454386860c876189eb1000e263ae02f0eca52582fcb7",
+    "tests/test_jarvis_backend.py": "7965b2a93b84a729eb4f31888658a70a8bfdd6f3de0c1afcdb7f5dfc75459d17",
+    "tests/test_superset_mcp.py": "b30eb23861b8a20cae68a205dc3620e31a58a92b97e105e6f02e6b01d24b61b7"
+  }
+}

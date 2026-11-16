@@ -1,6 +1,7 @@
 .env
 .jarvis_config.json
 .jarvis_config.json.tmp
+.jarvis_version_state.sqlite*
 .venv/
 venv/
 __pycache__/
