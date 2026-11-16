@@ -1,0 +1,14 @@
+@use "variables" as v;
+
+:root {
+  color-scheme: dark;
+  font: 14px/1.55 v.$font-mono;
+  color: v.$color-dark-text;
+  background: v.$color-dark-background;
+  --cyan: #{v.$color-dark-accent};
+  --cyan-dim: #{v.$color-dark-accent-muted};
+  --amber: #{v.$color-dark-warning};
+  --muted: #{v.$color-dark-muted};
+  --panel: #{v.$color-rgba-10-25-32-88};
+  --line: #{v.$color-rgba-102-234-255-22};
+}

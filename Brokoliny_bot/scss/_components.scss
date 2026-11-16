@@ -1,0 +1,109 @@
+@use "variables" as v;
+
+.prompt-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "diagnostics"
+    "task1"
+    "task2"
+    "advice";
+  gap: v.$space-grid;
+  align-items: start;
+}
+.prompt-diagnostics { grid-area: diagnostics; }
+.prompt-tasks, .prompt-task-grid { display: contents; }
+.prompt-tasks > h3 {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.prompt-task-grid > :nth-child(1) { grid-area: task1; }
+.prompt-task-grid > :nth-child(2) { grid-area: task2; }
+.prompt-task-grid > :nth-child(3) { grid-area: advice; }
+.prompt-card { min-width: 0; padding: 14px; border: 1px solid var(--line); background: v.$color-rgba-4-15-20-5; }
+.prompt-card h3 { margin: 0 0 8px; color: v.$color-hex-e2f3f5; font: 600 14px/1.4 v.$font-sans; }
+.prompt-card textarea { width: 100%; min-height: 190px; }
+.prompt-help, .prompt-context { color: var(--muted); font-size: 12px; }
+.prompt-context { margin: 8px 0; }
+.prompt-context table { font-size: 11px; }
+.trace-panel { margin-top: 12px; padding: 12px; border: 1px solid v.$color-rgba-102-234-255-18; background: v.$color-rgba-2-10-14-72; }
+.trace-panel h4 { margin: 0 0 8px; color: var(--cyan); }
+.trace-panel pre { max-height: 360px; }
+.trace-drawer {
+  position: fixed;
+  z-index: 20;
+  top: 0;
+  right: 0;
+  width: min(48vw, 760px);
+  height: 100vh;
+  overflow: auto;
+  padding: v.$space-panel;
+  border-left: 1px solid var(--cyan-dim);
+  background: v.$color-rgba-4-15-20-98;
+  box-shadow: -16px 0 48px v.$color-rgba-0-0-0-55;
+}
+.trace-drawer[hidden] { display: none; }
+.placeholder-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.placeholder-list button {
+  display: flex;
+  min-width: 180px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 7px 10px;
+  text-align: left;
+  font-size: 12px;
+}
+.placeholder-list code { color: var(--muted); font-size: 11px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+input, textarea, select, button {
+  max-width: 100%;
+  padding: 9px 11px;
+  border: 1px solid v.$color-rgba-102-234-255-28;
+  border-radius: 4px;
+  background: v.$color-rgba-3-13-18-8;
+  color: v.$color-hex-e2f3f5;
+  font: inherit;
+}
+:where(a, button, input, select, textarea, summary):focus-visible {
+  outline: 3px solid var(--cyan);
+  outline-offset: 3px;
+}
+input::placeholder { color: v.$color-hex-738a90; }
+button {
+  cursor: pointer;
+  background: v.$color-rgba-23-80-91-42;
+  color: var(--cyan);
+  transition: background .16s ease, box-shadow .16s ease, border-color .16s ease;
+}
+button:hover { border-color: var(--cyan); background: v.$color-rgba-28-102-116-48; box-shadow: 0 0 14px v.$color-rgba-102-234-255-12; }
+button.danger { border-color: v.$color-rgba-255-117-103-5; background: v.$color-rgba-102-34-34-3; color: v.$color-hex-ff9a8f; }
+button.danger:hover { border-color: v.$color-hex-ff7567; background: v.$color-rgba-142-41-36-55; }
+textarea { display: block; width: min(100%, 850px); min-height: 120px; margin: 8px 0; resize: vertical; }
+label { color: v.$color-hex-b7cbd0; }
+#users { display: grid; gap: 8px; margin-top: 12px; }
+#users .row { justify-content: space-between; padding: 8px; border: 1px solid v.$color-rgba-102-234-255-1; background: v.$color-rgba-4-15-20-5; }
+#users .row button:first-child { flex: 1; text-align: left; }
+pre {
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid v.$color-rgba-102-234-255-12;
+  border-radius: 4px;
+  background: v.$color-rgba-2-10-14-8;
+  color: v.$color-hex-c4dadd;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 8px; border-bottom: 1px solid v.$color-rgba-102-234-255-15; text-align: left; }
+th { color: var(--cyan); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+#status { min-height: 1.5em; margin: 10px 0 0; color: var(--amber); }
+details { margin: 8px 0; }
+summary { color: v.$color-hex-bdebf0; cursor: pointer; }
+a { color: var(--cyan); }
+
+.preview-image { max-width: min(100%, 360px); height: auto; }

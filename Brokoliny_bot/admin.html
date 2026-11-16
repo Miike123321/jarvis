@@ -4,199 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>broccolini — панель управления</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      font: 14px/1.55 ui-monospace, "SFMono-Regular", Menlo, monospace;
-      color: #d7e8eb;
-      background: #071116;
-      --cyan: #66eaff;
-      --cyan-dim: #2f8290;
-      --amber: #ffba62;
-      --muted: #829ba2;
-      --panel: rgba(10, 25, 32, .88);
-      --line: rgba(102, 234, 255, .22);
-    }
-    * { box-sizing: border-box; }
-    body {
-      position: relative;
-      isolation: isolate;
-      max-width: 1320px;
-      min-height: 100vh;
-      margin: 0 auto;
-      padding: 30px clamp(16px, 3vw, 42px) 64px;
-      background:
-        radial-gradient(ellipse at 12% 0%, rgba(20, 119, 137, .18), transparent 34rem),
-        radial-gradient(ellipse at 92% 18%, rgba(174, 101, 34, .1), transparent 30rem);
-    }
-    body::before {
-      position: fixed;
-      z-index: -1;
-      inset: 0;
-      background-image:
-        linear-gradient(rgba(102, 234, 255, .035) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(102, 234, 255, .035) 1px, transparent 1px);
-      background-size: 34px 34px;
-      content: "";
-      pointer-events: none;
-      mask-image: linear-gradient(to bottom, black, transparent 90%);
-    }
-    h1, h2, p { margin-top: 0; }
-    h1 {
-      margin-bottom: 4px;
-      color: #f0fbfc;
-      font: 600 clamp(24px, 4vw, 36px)/1.15 system-ui, sans-serif;
-      letter-spacing: .04em;
-    }
-    h1 span { color: var(--cyan); }
-    h2 {
-      margin-bottom: 14px;
-      color: var(--cyan);
-      font: 600 14px/1.4 system-ui, sans-serif;
-      letter-spacing: .14em;
-      text-transform: uppercase;
-    }
-    p { color: #a9bdc1; }
-    .masthead {
-      display: flex;
-      align-items: center;
-      gap: 20px;
-      padding: 6px 0 26px;
-      border-bottom: 1px solid var(--line);
-    }
-    .emblem {
-      position: relative;
-      display: grid;
-      flex: 0 0 62px;
-      width: 62px;
-      height: 62px;
-      place-items: center;
-      border: 1px solid var(--cyan-dim);
-      border-radius: 50%;
-      box-shadow: 0 0 28px rgba(102, 234, 255, .14), inset 0 0 18px rgba(102, 234, 255, .08);
-    }
-    .emblem::before, .emblem::after {
-      position: absolute;
-      border: 1px solid rgba(102, 234, 255, .48);
-      border-radius: 50%;
-      content: "";
-    }
-    .emblem::before { inset: 8px; border-style: dashed; }
-    .emblem::after { width: 15px; height: 15px; background: var(--cyan); box-shadow: 0 0 18px var(--cyan); }
-    .mast-copy { flex: 1; min-width: 0; }
-    .eyebrow, .system-state small {
-      display: block;
-      margin-bottom: 5px;
-      color: var(--muted);
-      font-size: 10px;
-      letter-spacing: .17em;
-      text-transform: uppercase;
-    }
-    .mast-copy p { margin-bottom: 0; font: 13px/1.5 system-ui, sans-serif; }
-    .system-state {
-      min-width: 170px;
-      padding: 10px 13px;
-      border-left: 1px solid var(--line);
-      color: #a9f6c8;
-      font-size: 10px;
-      letter-spacing: .12em;
-      text-align: right;
-    }
-    .system-state span::before {
-      display: inline-block;
-      width: 7px;
-      height: 7px;
-      margin-right: 8px;
-      border-radius: 50%;
-      background: #69efaa;
-      box-shadow: 0 0 10px #69efaa;
-      content: "";
-    }
-    .system-state small { margin: 5px 0 0; }
-    section {
-      position: relative;
-      margin: 16px 0;
-      padding: 20px;
-      overflow: hidden;
-      border: 1px solid var(--line);
-      border-radius: 3px 14px 3px 14px;
-      background: linear-gradient(135deg, rgba(14, 33, 41, .96), var(--panel));
-      box-shadow: 0 12px 32px rgba(0, 0, 0, .18), inset 0 1px rgba(255, 255, 255, .025);
-    }
-    section::before {
-      position: absolute;
-      top: 0;
-      left: 18px;
-      width: 68px;
-      height: 1px;
-      background: var(--cyan);
-      box-shadow: 0 0 10px var(--cyan);
-      content: "";
-    }
-    .auth-panel { margin-top: 20px; border-color: rgba(255, 186, 98, .32); }
-    .auth-panel::before { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr)); gap: 0 14px; }
-    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    input, textarea, select, button {
-      max-width: 100%;
-      padding: 9px 11px;
-      border: 1px solid rgba(102, 234, 255, .28);
-      border-radius: 4px;
-      background: rgba(3, 13, 18, .8);
-      color: #e2f3f5;
-      font: inherit;
-    }
-    input:focus, textarea:focus, select:focus, button:focus-visible {
-      outline: 2px solid var(--cyan);
-      outline-offset: 2px;
-    }
-    input::placeholder { color: #738a90; }
-    button {
-      cursor: pointer;
-      background: rgba(23, 80, 91, .42);
-      color: var(--cyan);
-      transition: background .16s ease, box-shadow .16s ease, border-color .16s ease;
-    }
-    button:hover { border-color: var(--cyan); background: rgba(28, 102, 116, .48); box-shadow: 0 0 14px rgba(102, 234, 255, .12); }
-    button.danger { border-color: rgba(255, 117, 103, .5); background: rgba(102, 34, 34, .3); color: #ff9a8f; }
-    button.danger:hover { border-color: #ff7567; background: rgba(142, 41, 36, .55); }
-    textarea { display: block; width: min(100%, 850px); min-height: 120px; margin: 8px 0; resize: vertical; }
-    label { color: #b7cbd0; }
-    #users { display: grid; gap: 8px; margin-top: 12px; }
-    #users .row { justify-content: space-between; padding: 8px; border: 1px solid rgba(102, 234, 255, .1); background: rgba(4, 15, 20, .5); }
-    #users .row button:first-child { flex: 1; text-align: left; }
-    pre {
-      overflow: auto;
-      padding: 12px;
-      border: 1px solid rgba(102, 234, 255, .12);
-      border-radius: 4px;
-      background: rgba(2, 10, 14, .8);
-      color: #c4dadd;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-    }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { padding: 8px; border-bottom: 1px solid rgba(102, 234, 255, .15); text-align: left; }
-    th { color: var(--cyan); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
-    #status { min-height: 1.5em; margin: 10px 0 0; color: var(--amber); }
-    details { margin: 8px 0; }
-    summary { color: #bdebf0; cursor: pointer; }
-    a { color: var(--cyan); }
-    @media (max-width: 600px) {
-      body { padding-top: 18px; }
-      .masthead { align-items: flex-start; gap: 12px; }
-      .emblem { flex-basis: 44px; width: 44px; height: 44px; }
-      .system-state { min-width: 0; padding: 6px 0 6px 10px; font-size: 8px; }
-      .system-state small { display: none; }
-      section { padding: 16px; }
-      #users .row { align-items: stretch; }
-    }
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
-    }
-  </style>
+  <link rel="stylesheet" href="/static/admin.css">
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Перейти к основному содержимому</a>
   <header class="masthead">
     <div class="emblem" aria-hidden="true"></div>
     <div class="mast-copy">
@@ -204,13 +15,28 @@
       <h1>BROCCOLINI <span>CONTROL</span></h1>
       <p>Центр управления персональными планами и системой обучения</p>
     </div>
-    <div class="system-state" aria-label="Локальная панель управления">
-      <span>ЛОКАЛЬНАЯ СЕССИЯ</span>
-      <small>ЗАЩИЩЁННЫЙ ДОСТУП</small>
+    <div class="mast-actions">
+      <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Розовая тема" aria-pressed="false">🎀 Розовая тема</button>
+      <div class="system-state" aria-label="Локальная панель управления">
+        <span>ЛОКАЛЬНАЯ СЕССИЯ</span>
+        <small>ЗАЩИЩЁННЫЙ ДОСТУП</small>
+      </div>
     </div>
   </header>
+  <main id="main-content" tabindex="-1">
+  <nav class="section-nav" aria-label="Разделы панели">
+    <a href="#connection">Подключение</a>
+    <a href="#profiles">Пользователи</a>
+    <a href="#ai-routes">AI-маршруты</a>
+    <a href="#prompt-workspace">Промты</a>
+    <a href="#logs">Логи AI</a>
+    <a href="#api-secret">API-ключ</a>
+    <a href="#content-heading">Кэш заданий</a>
+    <a href="#images-heading">Кэш изображений</a>
+    <a href="#templates-heading">Шаблоны</a>
+  </nav>
   <section class="auth-panel">
-    <h2>Подключение администратора</h2>
+    <h2 id="connection">Подключение администратора</h2>
     <p>Доступ к данным защищён токеном. Не вводите его на общих устройствах.</p>
     <div class="row">
       <label for="token">Токен администратора</label>
@@ -218,76 +44,153 @@
       <button onclick="connect()">Подключиться</button>
       <button onclick="disconnect()">Выйти</button>
     </div>
-    <p id="status" role="status"></p>
+    <p id="status" role="status" aria-live="polite" aria-busy="false"></p>
   </section>
   <div class="grid">
     <section>
-      <h2>Пользователи и профили</h2>
+      <h2 id="profiles">Пользователи и профили</h2>
       <p>Удаление очистит профиль, навыки, планы и историю выданных заданий. Сообщения в самом Telegram бот не хранит.</p>
       <p>Контактные данные отображаются только после отдельного согласия пользователя; они зашифрованы и не передаются AI.</p>
-      <button onclick="loadUsers()">Обновить список</button>
+      <button onclick="runAction(loadUsers)">Обновить список</button>
       <div id="users"></div>
       <div id="profile"></div>
     </section>
-    <section>
-      <h2>План на завтра</h2>
-      <label for="plan-user">Telegram ID</label>
-      <input id="plan-user" inputmode="numeric">
-      <div class="row">
-        <button onclick="regenerate()">Перегенерировать</button>
-        <button onclick="loadPlans()">История планов</button>
-      </div>
-      <p>Для ручного редактирования вставьте JSON полного плана. Структура проверяется сервером.</p>
-      <textarea id="plan-json" aria-label="JSON плана"></textarea>
-      <button onclick="savePlan()">Сохранить на завтра</button>
-      <div id="plans"></div>
-    </section>
   </div>
   <section>
-    <h2>AI-маршруты</h2>
+    <h2 id="ai-routes">AI-маршруты</h2>
     <div id="routes"></div>
     <h2>Лимиты</h2>
     <div id="budget"></div>
-    <h2>Системные промты</h2>
+    <h2>Общие системные промты</h2>
+    <p>Эти настройки применяются дополнительно к выбранному промту задания.</p>
     <div id="prompts"></div>
-    <h2>API-ключ</h2>
+    <h2 id="prompt-workspace">Промты диагностики и заданий</h2>
+    <p>Тест использует выбранный профиль ребёнка и не меняет активный промт. «Сохранить и заменить» отдельно применяет отредактированную версию к рабочей генерации.</p>
+    <label for="test-user">Пользователь для подстановки данных</label>
+    <select id="test-user" onchange="selectPromptUser(this.value)"></select>
+    <div id="prompt-context" class="prompt-context">Выберите профиль для просмотра контекста персонализации.</div>
+    <div class="prompt-layout">
+      <article class="prompt-card prompt-diagnostics">
+        <h3>Диагностика</h3>
+        <div id="prompt-card-diagnostics"></div>
+      </article>
+      <section class="prompt-tasks">
+        <h3>Задания</h3>
+        <div class="prompt-task-grid">
+          <article class="prompt-card">
+            <h3>Задание 1 · распечатка и изображение</h3>
+            <div id="prompt-card-focus_task"></div>
+          </article>
+          <article class="prompt-card">
+            <h3>Задание 2 · сенсорика / моторика</h3>
+            <div id="prompt-card-activity"></div>
+          </article>
+          <article class="prompt-card">
+            <h3>Совет дня</h3>
+            <div id="prompt-card-advice"></div>
+          </article>
+        </div>
+      </section>
+    </div>
+    <aside id="trace-drawer" class="trace-drawer" role="dialog" aria-label="Трассировка AI-запроса" hidden>
+      <div class="row">
+        <h3>Импакт · запросы и ответы AI</h3>
+        <button type="button" onclick="closeTrace()">Закрыть</button>
+      </div>
+      <div id="trace-content"></div>
+    </aside>
+    <h2 id="logs">Логи AI · хранение до 30 дней</h2>
     <div class="row">
+      <label for="log-user">Telegram ID (необязательно)</label>
+      <input id="log-user" inputmode="numeric" placeholder="Все пользователи">
+      <button onclick="loadAiLogs()">Обновить логи</button>
+    </div>
+    <div id="ai-logs"></div>
+    <h2 id="api-secret">API-ключ</h2>
+    <div class="row">
+      <label for="provider">Провайдер</label>
       <select id="provider">
         <option value="gemini">Gemini</option><option value="openai">OpenAI</option>
         <option value="anthropic">Anthropic</option><option value="vertex_ai">Vertex AI</option>
         <option value="replicate">Replicate / Flux</option>
       </select>
+      <label for="api-key">Новый API-ключ</label>
       <input id="api-key" type="password" autocomplete="new-password" placeholder="Новый ключ">
       <button onclick="saveSecret()">Зашифровать и сохранить</button>
     </div>
   </section>
   <section>
-    <h2>Кэш заданий и игр</h2>
+    <h2 id="content-heading">Кэш заданий и игр</h2>
     <button onclick="loadContent()">Показать кэш выбранного пользователя</button>
     <div id="content-cache"></div>
   </section>
   <section>
-    <h2>Кэш изображений</h2>
-    <button onclick="loadImages()">Обновить кэш</button>
+    <h2 id="images-heading">Кэш изображений</h2>
+    <button onclick="runAction(loadImages)">Обновить кэш</button>
     <div id="images"></div>
-    <h2>Векторные шаблоны</h2>
-    <button onclick="loadTemplates()">Обновить шаблоны</button>
+    <h2 id="templates-heading">Векторные шаблоны</h2>
+    <button onclick="runAction(loadTemplates)">Обновить шаблоны</button>
     <div id="templates"></div>
   </section>
+  </main>
 <script>
   const tokenInput = document.querySelector("#token");
   tokenInput.value = sessionStorage.getItem("adminToken") || "";
   const statusBox = document.querySelector("#status");
+  const themeToggle = document.querySelector("#theme-toggle");
+  function applyTheme(theme) {
+    const pink = theme === "kawaii";
+    document.documentElement.dataset.theme = pink ? "kawaii" : "dark";
+    themeToggle.setAttribute("aria-pressed", String(pink));
+    themeToggle.textContent = pink ? "◐ Тёмная тема" : "🎀 Розовая тема";
+  }
+  try {
+    applyTheme(localStorage.getItem("adminTheme"));
+  } catch (error) {
+    applyTheme("dark");
+    statusBox.textContent = "Не удалось загрузить сохранённую тему: " + error.message;
+  }
+  themeToggle.addEventListener("click", () => {
+    const theme = document.documentElement.dataset.theme === "kawaii" ? "dark" : "kawaii";
+    applyTheme(theme);
+    try {
+      localStorage.setItem("adminTheme", theme);
+    } catch (error) {
+      statusBox.textContent = "Тема переключена, но не сохранена: " + error.message;
+    }
+  });
   function authHeaders() {
     return { "Authorization": `Bearer ${tokenInput.value}`, "Content-Type": "application/json" };
   }
+  let pendingRequests = 0;
   async function api(path, options = {}) {
-    const response = await fetch(path, { ...options, headers: { ...authHeaders(), ...options.headers } });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
-    return body;
+    pendingRequests += 1;
+    statusBox.setAttribute("aria-busy", "true");
+    statusBox.textContent = "Загрузка…";
+    try {
+      const response = await fetch(path, { ...options, headers: { ...authHeaders(), ...options.headers } });
+      const body = await response.json();
+      if (!response.ok) {
+        const detail = body.detail;
+        const error = new Error(
+          typeof detail === "string" ? detail : detail?.message || `HTTP ${response.status}`
+        );
+        error.payload = detail;
+        throw error;
+      }
+      return body;
+    } finally {
+      pendingRequests -= 1;
+      if (!pendingRequests) {
+        statusBox.setAttribute("aria-busy", "false");
+        if (statusBox.textContent === "Загрузка…") statusBox.textContent = "";
+      }
+    }
   }
   function showError(error) { statusBox.textContent = error.message; }
+  async function runAction(action) {
+    try { await action(); } catch (error) { showError(error); }
+  }
   async function connect() {
     sessionStorage.setItem("adminToken", tokenInput.value);
     try {
@@ -299,12 +202,20 @@
   function disconnect() {
     sessionStorage.removeItem("adminToken");
     tokenInput.value = "";
-    document.querySelectorAll("#users, #profile, #routes, #budget, #prompts, #images, #plans")
+    document.querySelectorAll("#users, #profile, #routes, #budget, #prompts, #images")
       .forEach(element => element.replaceChildren());
+    document.querySelectorAll("#ai-logs, #prompt-context, #prompt-card-diagnostics, #prompt-card-focus_task, #prompt-card-activity, #prompt-card-advice, #preview-focus_task, #preview-activity, #preview-advice")
+      .forEach(element => element.replaceChildren());
+    closeTrace();
     statusBox.textContent = "Токен удалён из этой вкладки.";
   }
   async function loadUsers() {
     const users = await api("/admin/users");
+    const testUsers = users.filter(user => user.age_months !== null);
+    const previousTestUser = document.querySelector("#test-user").value;
+    document.querySelector("#test-user").innerHTML = testUsers.map(user =>
+      `<option value="${user.telegram_id}">${user.telegram_id} · ${user.age_months} мес. · ${user.language === "uk" ? "Українська" : "Русский"}</option>`
+    ).join("");
     document.querySelector("#users").innerHTML = users.map(user => {
       const identity = user.identity_consent === "granted"
         ? [user.full_name, `ребёнок: ${user.child_name}`, user.phone_number]
@@ -321,6 +232,9 @@
         ${user.active ? "активен" : "онбординг"} · ${escapeHtml(user.delivery_time)}</button>
         <button class="danger" onclick="deleteUser(${user.telegram_id})">Удалить пользователя</button></div>`;
     }).join("");
+    const selectedTestUser = testUsers.find(user => String(user.telegram_id) === previousTestUser) || testUsers[0];
+    if (selectedTestUser) await selectPromptUser(selectedTestUser.telegram_id);
+    else document.querySelector("#prompt-context").textContent = "Нет профилей для тестирования.";
   }
   async function deleteUser(id) {
     const confirmed = window.confirm(
@@ -329,10 +243,7 @@
     if (!confirmed) return;
     try {
       await api(`/admin/users/${id}`, { method: "DELETE" });
-      if (document.querySelector("#plan-user").value === String(id)) {
-        document.querySelector("#plan-user").value = "";
-        document.querySelector("#plan-json").value = "";
-        document.querySelector("#plans").replaceChildren();
+      if (document.querySelector("#test-user").value === String(id)) {
         document.querySelector("#content-cache").replaceChildren();
         document.querySelector("#profile").replaceChildren();
       }
@@ -341,7 +252,7 @@
     } catch (error) { showError(error); }
   }
   async function selectUser(id) {
-    document.querySelector("#plan-user").value = id;
+    document.querySelector("#test-user").value = String(id);
     try {
       const profile = await api(`/admin/users/${id}`);
       const skills = profile.skills.map(skill =>
@@ -358,52 +269,13 @@
          <details><summary>Полные данные профиля</summary><pre>${escapeHtml(JSON.stringify(profile, null, 2))}</pre></details>`;
     } catch (error) { showError(error); }
   }
-  async function loadPlans() {
-    try {
-      const plans = await api(`/admin/users/${document.querySelector("#plan-user").value}/plans`);
-      const id = document.querySelector("#plan-user").value;
-      document.querySelector("#plans").innerHTML = plans.map(plan =>
-        `<details><summary>${escapeHtml(plan.plan_date)} · ${escapeHtml(plan.status)}
-          <a target="_blank" rel="noopener" href="/admin/users/${id}/plans/${plan.plan_date}/worksheet.pdf">PDF</a>
-        </summary>${plan.status === "sent"
-          ? `<button onclick="resendPlan(${id}, '${escapeHtml(plan.plan_date)}')">Отправить этот план повторно</button>`
-          : ""}
-          <pre>${escapeHtml(JSON.stringify(plan.content, null, 2))}</pre></details>`
-      ).join("");
-    } catch (error) { showError(error); }
-  }
-  async function resendPlan(id, planDate) {
-    if (!window.confirm(`Повторно отправить пользователю ${id} план за ${planDate}?`)) return;
-    try {
-      await api(`/admin/users/${id}/plans/${planDate}/resend`, { method: "POST" });
-      statusBox.textContent = `План за ${planDate} повторно отправлен пользователю ${id}.`;
-    } catch (error) { showError(error); }
-  }
-  async function regenerate() {
-    try {
-      const id = document.querySelector("#plan-user").value;
-      const result = await api(`/admin/users/${id}/plans/tomorrow/regenerate`, { method: "POST" });
-      document.querySelector("#plan-json").value = JSON.stringify(result.plan, null, 2);
-      statusBox.textContent = `План ${result.plan_date} создан и ожидает проверки/отправки.`;
-    } catch (error) { showError(error); }
-  }
-  async function savePlan() {
-    try {
-      const id = document.querySelector("#plan-user").value;
-      const plan = JSON.parse(document.querySelector("#plan-json").value);
-      const result = await api(`/admin/users/${id}/plans/tomorrow`, {
-        method: "PUT", body: JSON.stringify({ plan })
-      });
-      statusBox.textContent = `План на ${result.plan_date} сохранён.`;
-    } catch (error) { showError(error); }
-  }
   async function loadRoutes() {
     const routes = await api("/admin/settings/routes");
     document.querySelector("#routes").innerHTML = Object.entries(routes).map(([task, route]) =>
-      `<div class="row"><b>${task}</b><select id="provider-${task}">${["gemini","openai","anthropic","vertex_ai","replicate"].map(value =>
+      `<div class="row"><b>${escapeHtml(task)}</b><label>Провайдер <select id="provider-${task}">${["gemini","openai","anthropic","vertex_ai","replicate"].map(value =>
         `<option ${route.provider === value ? "selected" : ""}>${value}</option>`).join("")}</select>
-        <input id="model-${task}" value="${escapeHtml(route.model)}">
-        <input id="tokens-${task}" type="number" value="${route.max_tokens}" min="100" max="16000">
+        </label><label>Модель <input id="model-${task}" value="${escapeHtml(route.model)}"></label>
+        <label>Макс. токенов <input id="tokens-${task}" type="number" value="${route.max_tokens}" min="100" max="16000"></label>
         <button onclick="saveRoute('${task}')">Сохранить</button></div>`
     ).join("");
   }
@@ -435,28 +307,171 @@
       statusBox.textContent = "Лимиты обновлены.";
     } catch (error) { showError(error); }
   }
+  const promptCards = {
+    diagnostics: { promptName: "diagnostics" },
+    focus_task: { promptName: "daily_plan_task1" },
+    activity: { promptName: "daily_plan_task2" },
+    advice: { promptName: "daily_plan_advice" }
+  };
+  const sharedPromptTitles = {
+    safety: "Безопасность",
+    daily_plan: "Общие правила дневного плана",
+    image: "Стиль изображений"
+  };
+  const promptPlaceholderLabels = {
+    "child.age_months": "Возраст в полных месяцах",
+    "child.gender": "Пол",
+    "child.language": "Язык",
+    "child.interests": "Интересы ребёнка",
+    "child.skills": "Навыки ребёнка",
+    "child.diagnostic_results": "Результаты диагностики",
+    "child.skill_gaps": "Навыки для дополнительного внимания",
+    "plan.previous_difficulty": "Обратная связь по сложности",
+    "plan.recent_components": "Недавние задания",
+    "diagnostics.excluded_skill_ids": "Исключённые навыки диагностики",
+    "diagnostics.excluded_questions": "Исключённые вопросы диагностики"
+  };
+  function renderPromptCard(name, item) {
+    const config = promptCards[name];
+    const hasPlaceholders = Array.isArray(item.placeholders);
+    const buttons = (hasPlaceholders ? item.placeholders : []).map(placeholder =>
+      `<button type="button" title="Вставить {{${escapeHtml(placeholder)}}}" onclick="insertPromptPlaceholder('${config.promptName}', '${placeholder}')">
+        <span>${escapeHtml(promptPlaceholderLabels[placeholder] || placeholder)}</span>
+        <code>{{${escapeHtml(placeholder)}}}</code>
+      </button>`
+    ).join("");
+    return `<label for="prompt-${config.promptName}">Промт-шаблон · версия ${item.version}</label>
+      <textarea id="prompt-${config.promptName}" data-original="${escapeHtml(item.prompt)}">${escapeHtml(item.prompt)}</textarea>
+      <p class="prompt-help" id="prompt-state-${config.promptName}">Активная версия ${item.version}; черновик станет рабочим только после «Сохранить и заменить».</p>
+      <div class="prompt-help">Плейсхолдеры вставляются в позицию курсора. Пустые значения отображаются как «не задано».</div>
+      ${hasPlaceholders ? "" : '<p role="alert">Сервер не вернул список плейсхолдеров. Перезапустите backend из актуальной версии проекта.</p>'}
+      <div class="placeholder-list">${buttons}</div>
+      <div class="row">
+        <button type="button" onclick="testComponent('${name}', this)">Сгенерировать</button>
+        <button type="button" onclick="savePrompt('${config.promptName}')">Сохранить и заменить</button>
+        <button type="button" onclick="loadPromptHistory('${config.promptName}')">История версий</button>
+      </div>
+      <div id="history-${config.promptName}"></div>
+      <div id="preview-${name}"></div>`;
+  }
   async function loadPrompts() {
     const prompts = await api("/admin/settings/prompts");
-    const promptTitles = {
-      safety: "Безопасность",
-      diagnostics: "Диагностика",
-      daily_plan: "Дневной план",
-      image: "Стиль изображений"
-    };
-    document.querySelector("#prompts").innerHTML = prompts.map(item =>
-      `<label>${promptTitles[item.name] || escapeHtml(item.name)} · версия ${item.version}</label>
-       <textarea id="prompt-${item.name}">${escapeHtml(item.prompt)}</textarea>
-       <button onclick="savePrompt('${item.name}')">Сохранить промт</button>
-       <button onclick="loadPromptHistory('${item.name}')">История версий</button>
-       <div id="history-${item.name}"></div>`
-    ).join("");
+    const targetNames = new Set(Object.values(promptCards).map(config => config.promptName));
+    document.querySelector("#prompts").innerHTML = prompts
+      .filter(item => !targetNames.has(item.name))
+      .map(item => `<details><summary>${escapeHtml(sharedPromptTitles[item.name] || item.name)} · версия ${item.version}</summary>
+        <label for="prompt-${item.name}">Текст системного промта</label>
+        <textarea id="prompt-${item.name}">${escapeHtml(item.prompt)}</textarea>
+        <button onclick="savePrompt('${item.name}')">Сохранить и заменить</button>
+        <button onclick="loadPromptHistory('${item.name}')">История версий</button>
+        <div id="history-${item.name}"></div>
+      </details>`).join("");
+    for (const [component, config] of Object.entries(promptCards)) {
+      const item = prompts.find(prompt => prompt.name === config.promptName);
+      const target = document.querySelector(`#prompt-card-${component}`);
+      target.innerHTML = item
+        ? renderPromptCard(component, item)
+        : `<p role="alert">Промт ${escapeHtml(config.promptName)} не найден.</p>`;
+      const textarea = document.querySelector(`#prompt-${config.promptName}`);
+      if (textarea) {
+        textarea.dataset.version = item.version;
+        restorePromptDraft(textarea, config.promptName);
+        textarea.addEventListener("input", handlePromptInput);
+      }
+    }
+    updatePromptDirtyState();
+  }
+  function restorePromptDraft(textarea, name) {
+    try {
+      const saved = sessionStorage.getItem(`promptDraft:${name}`);
+      if (saved === null) return;
+      const draft = JSON.parse(saved);
+      if (typeof draft.text !== "string" || typeof draft.version !== "string") {
+        throw new Error("неверный формат сохранённого черновика");
+      }
+      textarea.value = draft.text;
+      textarea.dataset.draftVersion = draft.version;
+      if (draft.version !== textarea.dataset.version) textarea.dataset.staleDraft = "true";
+    } catch (error) {
+      textarea.dataset.draftError = `Не удалось восстановить черновик: ${error.message}`;
+      statusBox.textContent = `Не удалось восстановить черновик ${name}: ${error.message}`;
+    }
+  }
+  function handlePromptInput(event) {
+    const textarea = event.currentTarget;
+    const name = textarea.id.slice("prompt-".length);
+    try {
+      if (textarea.value === textarea.dataset.original) {
+        sessionStorage.removeItem(`promptDraft:${name}`);
+        delete textarea.dataset.staleDraft;
+        delete textarea.dataset.draftVersion;
+      } else {
+        sessionStorage.setItem(`promptDraft:${name}`, JSON.stringify({
+          text: textarea.value, version: textarea.dataset.draftVersion || textarea.dataset.version
+        }));
+      }
+      delete textarea.dataset.draftError;
+    } catch (error) {
+      textarea.dataset.draftError = `Не удалось сохранить черновик в этой вкладке: ${error.message}`;
+      statusBox.textContent = `Не удалось сохранить черновик ${name} в этой вкладке: ${error.message}`;
+    }
+    updatePromptDirtyState();
+  }
+  function updatePromptDirtyState() {
+    let dirty = false;
+    Object.values(promptCards).forEach(({ promptName }) => {
+      const textarea = document.querySelector(`#prompt-${promptName}`);
+      const state = document.querySelector(`#prompt-state-${promptName}`);
+      if (textarea && state) {
+        const changed = textarea.value !== textarea.dataset.original;
+        dirty ||= changed;
+        state.textContent = textarea.dataset.draftError || (!changed
+          ? `Промт совпадает с активной версией.`
+          : textarea.dataset.staleDraft === "true"
+            ? "Активная версия изменилась после сохранения черновика. Сверьте текст перед заменой."
+            : "Несохранённый черновик: тест использует его, рабочая генерация пока не меняется.");
+      }
+    });
+    statusBox.dataset.promptDirty = dirty ? "true" : "false";
+  }
+  window.addEventListener("beforeunload", event => {
+    if (statusBox.dataset.promptDirty !== "true") return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
+  function insertPromptPlaceholder(name, placeholder) {
+    const textarea = document.querySelector(`#prompt-${name}`);
+    if (!textarea) return;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const value = `{{${placeholder}}}`;
+    textarea.setRangeText(value, start, end, "end");
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    textarea.focus();
   }
   async function savePrompt(name) {
     try {
-      const prompt = document.querySelector(`#prompt-${name}`).value;
-      await api(`/admin/settings/prompts/${name}`, { method: "PUT", body: JSON.stringify({ prompt }) });
-      await loadPrompts();
-      statusBox.textContent = `Промт ${name} сохранён с новой версией.`;
+      const textarea = document.querySelector(`#prompt-${name}`);
+      const prompt = textarea.value;
+      if (!window.confirm(`Сохранить и заменить активный промт «${name}» новой версией?`)) return;
+      const saved = await api(`/admin/settings/prompts/${name}`, {
+        method: "PUT", body: JSON.stringify({ prompt })
+      });
+      textarea.dataset.original = prompt;
+      const card = Object.entries(promptCards).find(([, config]) => config.promptName === name);
+      if (card) {
+        textarea.dataset.version = String(saved.version);
+        delete textarea.dataset.staleDraft;
+        delete textarea.dataset.draftVersion;
+        textarea.previousElementSibling.textContent = `Промт-шаблон · версия ${saved.version}`;
+        handlePromptInput({ currentTarget: textarea });
+      } else {
+        const summary = textarea.closest("details")?.querySelector("summary");
+        if (summary) {
+          summary.textContent = `${sharedPromptTitles[name] || name} · версия ${saved.version}`;
+        }
+      }
+      statusBox.textContent = `Промт ${name} сохранён и заменил активную версию · версия ${saved.version}.`;
     } catch (error) { showError(error); }
   }
   async function loadPromptHistory(name) {
@@ -465,6 +480,164 @@
       document.querySelector(`#history-${name}`).innerHTML =
         `<pre>${escapeHtml(JSON.stringify(history, null, 2))}</pre>`;
     } catch (error) { showError(error); }
+  }
+  async function selectPromptUser(id) {
+    if (!id) return;
+    await Promise.all([selectUser(id), loadPromptContext(id)]);
+  }
+  async function loadPromptContext(id) {
+    try {
+      const context = await api(`/admin/prompt-tests/context/${id}`);
+      const fields = [
+        ["Возраст, месяцев", context.age_months],
+        ["Пол", context.gender],
+        ["Язык", context.language],
+        ["Интересы", context.interests],
+        ["Навыки / результаты диагностики", context.diagnostic_results],
+        ["Навыки для дополнительного внимания", context.skill_gaps],
+        ["Обратная связь по сложности", context.previous_difficulty],
+        ["Недавние задания для исключения повторов", context.recent_components],
+        ["Исключённые навыки диагностики", context.excluded_skill_ids],
+        ["Исключённые вопросы диагностики", context.excluded_questions]
+      ];
+      document.querySelector("#prompt-context").innerHTML =
+        `<strong>Персональный контекст запроса</strong><table><tbody>${fields.map(([label, value]) =>
+          `<tr><th>${escapeHtml(label)}</th><td><pre>${escapeHtml(
+            value === null || value === undefined || value === "" ? "не задано" :
+              typeof value === "string" ? value : JSON.stringify(value, null, 2)
+          )}</pre></td></tr>`).join("")}</tbody></table>
+        <p>${escapeHtml(context.privacy_note)}</p>`;
+    } catch (error) { showError(error); }
+  }
+  async function testComponent(component, trigger) {
+    const target = document.querySelector(`#preview-${component}`);
+    const label = trigger?.textContent;
+    if (trigger) {
+      trigger.disabled = true;
+      trigger.textContent = "Генерация…";
+    }
+    target.setAttribute("aria-busy", "true");
+    try {
+      const id = Number(document.querySelector("#test-user").value);
+      if (!id) throw new Error("Сначала выберите пользователя с профилем ребёнка.");
+      const result = await api(`/admin/prompt-tests/${component}`, {
+        method: "POST", body: JSON.stringify({
+          telegram_id: id,
+          prompt: document.querySelector(`#prompt-${promptCards[component].promptName}`).value
+        })
+      });
+      target.innerHTML = `<h4>Результат генерации</h4>
+        <p>${result.id ? `Вариант #${result.id} · ${escapeHtml(result.status)}` : "Тест диагностики · без сохранения результата"}
+        ${result.image_source ? ` · изображение: ${result.image_source === "cache" ? "из кэша" : "создано новым запросом"}` : ""}</p>
+        ${result.image_url ? `<img class="preview-image" alt="Предпросмотр изображения задания 1">` : ""}
+        <pre>${escapeHtml(JSON.stringify(result.content, null, 2))}</pre>
+        ${result.id ? `<div class="row">
+          <button data-variant-id="${result.id}" onclick="resolveVariant('${component}', ${result.id}, 'accepted')">Сохранить для пользователя</button>
+          <button class="danger" data-variant-id="${result.id}" onclick="resolveVariant('${component}', ${result.id}, 'rejected')">Отклонить</button>
+        </div>` : ""}`;
+      showTrace(result.trace || [], trigger);
+      if (result.image_url) await loadVariantImage(result.id, target.querySelector("img"));
+      statusBox.textContent = `Вариант ${component} сгенерирован для ${id}.`;
+    } catch (error) {
+      const trace = error.payload?.trace || [];
+      target.innerHTML = `<p role="alert">${escapeHtml(error.message)}</p>`;
+      showTrace(trace, trigger);
+      showError(error);
+    } finally {
+      target.setAttribute("aria-busy", "false");
+      if (trigger) {
+        trigger.disabled = false;
+        trigger.textContent = label;
+      }
+    }
+  }
+  let traceTrigger = null;
+  function showTrace(traces, trigger) {
+    traceTrigger = trigger || document.activeElement;
+    document.querySelector("#trace-content").innerHTML = renderTrace(traces);
+    document.querySelector("#trace-drawer").hidden = false;
+    document.querySelector("#trace-drawer button").focus();
+  }
+  function closeTrace() {
+    const drawer = document.querySelector("#trace-drawer");
+    if (drawer) drawer.hidden = true;
+    if (traceTrigger?.isConnected) traceTrigger.focus();
+    traceTrigger = null;
+  }
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !document.querySelector("#trace-drawer").hidden) closeTrace();
+  });
+  function renderTrace(traces) {
+    if (!traces.length) return `<div class="trace-panel"><p>Трассировка AI-запросов недоступна для этого запуска.</p></div>`;
+    return `<div class="trace-panel"><h4>Фактические запросы к AI</h4>${traces.map((item, index) => {
+      const request = item.request || {};
+      const response = item.response || {};
+      const usage = response.usage || {};
+      const content = request.messages
+        ? request.messages.map(message => `${message.role.toUpperCase()}:\n${message.content}`).join("\n\n")
+        : request.prompt || request;
+      return `<details ${index === 0 ? "open" : ""}><summary>Вызов #${item.id} · ${escapeHtml(item.task)} · ${escapeHtml(item.status)}</summary>
+        <p>Модель: ${escapeHtml(request.model || item.model || "не указана")} ·
+          длительность: ${response.duration_ms == null ? "не предоставлена" : `${response.duration_ms} мс`} ·
+          токены: ${usage.prompt_tokens == null ? "не предоставлены" : usage.prompt_tokens} / ${usage.completion_tokens == null ? "не предоставлены" : usage.completion_tokens} ·
+          стоимость: ${response.cost_usd == null ? "не предоставлена" : `$${response.cost_usd}`}</p>
+        <strong>Фактический запрос</strong><pre>${escapeHtml(typeof content === "string" ? content : JSON.stringify(content, null, 2))}</pre>
+        <strong>Параметры запроса</strong><pre>${escapeHtml(JSON.stringify(request, null, 2))}</pre>
+        <strong>Ответ / результат API</strong><pre>${escapeHtml(JSON.stringify(response, null, 2))}</pre>
+      </details>`;
+    }).join("")}</div>`;
+  }
+  async function loadVariantImage(id, image) {
+    const response = await fetch(`/admin/prompt-tests/variants/${id}/image`, {
+      headers: authHeaders()
+    });
+    if (!response.ok) {
+      const body = await response.json();
+      throw new Error(body.detail || `HTTP ${response.status}`);
+    }
+    image.src = URL.createObjectURL(await response.blob());
+  }
+  async function resolveVariant(component, id, status) {
+    try {
+      await api(`/admin/prompt-tests/variants/${id}/resolve`, {
+        method: "POST", body: JSON.stringify({ status })
+      });
+      statusBox.textContent = status === "accepted"
+        ? `Вариант ${id} сохранён только для выбранного пользователя.`
+        : `Вариант ${id} отклонён.`;
+      document.querySelectorAll(`#preview-${component} button[data-variant-id="${id}"]`)
+        .forEach(button => button.disabled = true);
+    } catch (error) { showError(error); }
+  }
+  async function loadAiLogs() {
+    try {
+      const userId = document.querySelector("#log-user").value.trim();
+      const query = new URLSearchParams({ limit: "100" });
+      if (userId) query.set("telegram_id", userId);
+      const logs = await api(`/admin/ai-logs?${query}`);
+      document.querySelector("#ai-logs").innerHTML = logs.map(log =>
+        `<details><summary>${escapeHtml(log.created_at)} · ${escapeHtml(log.task)} ·
+          ${escapeHtml(log.status)} · user ${escapeHtml(log.telegram_id ?? "—")} · ${escapeHtml(log.model)}</summary>
+          <strong>Полный запрос</strong><pre>${escapeHtml(JSON.stringify(log.request, null, 2))}</pre>
+          <strong>Ответ</strong><pre>${escapeHtml(JSON.stringify(log.response, null, 2))}</pre>
+          ${log.response?.image_cache_tag_hash
+            ? `<img class="preview-image" data-cache-hash="${escapeHtml(log.response.image_cache_tag_hash)}" alt="Результат генерации изображения">`
+            : ""}</details>`
+      ).join("") || "<p>Логов пока нет.</p>";
+      await Promise.all([...document.querySelectorAll("#ai-logs img[data-cache-hash]")].map(image =>
+        loadCachedImage(image.dataset.cacheHash, image)
+      ));
+    } catch (error) { showError(error); }
+  }
+  async function loadCachedImage(hash, image) {
+    const response = await fetch(`/admin/images/${encodeURIComponent(hash)}/file`, {
+      headers: authHeaders()
+    });
+    if (!response.ok) {
+      const body = await response.json();
+      throw new Error(body.detail || `HTTP ${response.status}`);
+    }
+    image.src = URL.createObjectURL(await response.blob());
   }
   async function saveSecret() {
     try {
@@ -484,13 +657,16 @@
   }
   async function loadContent() {
     try {
-      const id = document.querySelector("#plan-user").value;
+      const id = document.querySelector("#test-user").value;
+      if (!id) throw new Error("Сначала выберите пользователя для просмотра кэша.");
       const content = await api(`/admin/content-cache?telegram_id=${encodeURIComponent(id)}`);
-      document.querySelector("#content-cache").innerHTML = content.map(item =>
-        `<details><summary>${escapeHtml(item.category)} · ${item.used_by_user ? "уже выдавалось" : "ещё не выдавалось"}</summary>
+      document.querySelector("#content-cache").innerHTML = content.map(item => {
+        const personal = item.cohort.startsWith(`personal:${id}:`);
+        return `<details><summary>${escapeHtml(item.category)} · ${personal ? "личный вариант" : "общий кэш"} ·
+          ${item.used_by_user ? "уже выдавалось" : "ещё не выдавалось"}</summary>
          <pre>${escapeHtml(JSON.stringify(item.content, null, 2))}</pre>
-         <button onclick="deleteContent('${item.content_hash}')">Удалить из общего кэша</button></details>`
-      ).join("");
+         <button onclick="deleteContent('${item.content_hash}')">${personal ? "Удалить личный вариант" : "Удалить из общего кэша"}</button></details>`;
+      }).join("");
     } catch (error) { showError(error); }
   }
   async function deleteContent(hash) {

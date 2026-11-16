@@ -1,0 +1,82 @@
+@use "variables" as v;
+
+.masthead {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 6px 0 26px;
+  border-bottom: 1px solid var(--line);
+}
+.emblem {
+  position: relative;
+  display: grid;
+  flex: 0 0 62px;
+  width: 62px;
+  height: 62px;
+  place-items: center;
+  border: 1px solid var(--cyan-dim);
+  border-radius: 50%;
+  box-shadow: 0 0 28px v.$color-rgba-102-234-255-14, inset 0 0 18px v.$color-rgba-102-234-255-08;
+}
+.emblem::before, .emblem::after {
+  position: absolute;
+  border: 1px solid v.$color-rgba-102-234-255-48;
+  border-radius: 50%;
+  content: "";
+}
+.emblem::before { inset: 8px; border-style: dashed; }
+.emblem::after { width: 15px; height: 15px; background: var(--cyan); box-shadow: 0 0 18px var(--cyan); }
+.mast-copy { flex: 1; min-width: 0; }
+.eyebrow, .system-state small {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: .17em;
+  text-transform: uppercase;
+}
+.mast-copy p { margin-bottom: 0; font: 13px/1.5 v.$font-sans; }
+.system-state {
+  min-width: 170px;
+  padding: 10px 13px;
+  border-left: 1px solid var(--line);
+  color: v.$color-hex-a9f6c8;
+  font-size: 10px;
+  letter-spacing: .12em;
+  text-align: right;
+}
+.system-state span::before {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: v.$color-hex-69efaa;
+  box-shadow: 0 0 10px v.$color-hex-69efaa;
+  content: "";
+}
+.system-state small { margin: 5px 0 0; }
+.mast-actions { display: flex; align-items: center; gap: 12px; }
+.theme-toggle { white-space: nowrap; border-radius: 999px; }
+section {
+  position: relative;
+  margin: 16px 0;
+  padding: v.$space-panel;
+  border: 1px solid var(--line);
+  border-radius: 3px 14px 3px 14px;
+  background: linear-gradient(135deg, v.$color-rgba-14-33-41-96, var(--panel));
+  box-shadow: 0 12px 32px v.$color-rgba-0-0-0-18, inset 0 1px v.$color-rgba-255-255-255-025;
+}
+section::before {
+  position: absolute;
+  top: 0;
+  left: 18px;
+  width: 68px;
+  height: 1px;
+  background: var(--cyan);
+  box-shadow: 0 0 10px var(--cyan);
+  content: "";
+}
+.auth-panel { margin-top: 20px; border-color: v.$color-rgba-255-186-98-32; }
+.auth-panel::before { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr)); gap: 0 14px; }

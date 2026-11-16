@@ -35,6 +35,7 @@ class Worksheet(StrictModel):
 class FocusTask(StrictModel):
     title: str = Field(min_length=2, max_length=100)
     worksheet: Worksheet
+    image_prompt: str = Field(min_length=8, max_length=400)
 
 
 class Activity(StrictModel):
@@ -42,13 +43,17 @@ class Activity(StrictModel):
     materials: list[str] = Field(min_length=1, max_length=8)
     parent_script: str = Field(min_length=8, max_length=700)
     age_facts: list[str] = Field(min_length=2, max_length=5)
-    story_prompt: str | None = Field(max_length=400)
+    story_prompt: str | None = Field(default=None, max_length=400)
 
 
 class DailyPlan(StrictModel):
     focus_task: FocusTask
     activity: Activity
     parent_advice: str = Field(min_length=8, max_length=700)
+
+
+class ParentAdvice(StrictModel):
+    text: str = Field(min_length=8, max_length=700)
 
 
 class RouteUpdate(StrictModel):
@@ -59,6 +64,15 @@ class RouteUpdate(StrictModel):
 
 class PromptUpdate(StrictModel):
     prompt: str = Field(min_length=20, max_length=12000)
+
+
+class PromptTestRequest(StrictModel):
+    telegram_id: int = Field(gt=0)
+    prompt: str | None = Field(default=None, min_length=20, max_length=12000)
+
+
+class PromptTestResolution(StrictModel):
+    status: Literal["accepted", "rejected"]
 
 
 class SecretUpdate(StrictModel):

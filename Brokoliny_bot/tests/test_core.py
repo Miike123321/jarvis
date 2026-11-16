@@ -9,7 +9,7 @@ import io
 import json
 import sqlite3
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -31,11 +31,18 @@ from app.bot import (
 )
 from app.content_library import ContentExhausted, ContentLibrary
 from app.config import Settings
-from app.database import Database
+from app.database import DEFAULT_PROMPTS, LEGACY_DAILY_PLAN_PROMPT, Database
 from app.image_cache import ImageCache
 from app.plans import deliver_plan, feedback_keyboard, plan_message
 from app.printables import make_stimulus, make_worksheet
-from app.schemas import AssessmentResponse, DailyPlan
+from app.prompt_templates import render_prompt_template, validate_prompt_template
+from app.schemas import (
+    Activity,
+    AssessmentResponse,
+    DailyPlan,
+    FocusTask,
+    ParentAdvice,
+)
 from app.security import SecretVault, valid_admin_token
 
 
@@ -63,6 +70,20 @@ class AgeParsingTests(unittest.TestCase):
         for value in ("15.11.2026", "15.04.2026", "14.10.2019", "not a date"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_birth_date(value, today)
+
+
+class PromptTemplateTests(unittest.TestCase):
+    def test_prompt_template_renders_personal_context_and_rejects_unknown_fields(self) -> None:
+        rendered = render_prompt_template(
+            "Возраст: {{child.age_months}}; навыки: {{child.skills}}",
+            {"child.age_months": 40, "child.skills": [{"skill_id": "sorting"}]},
+        )
+        self.assertIn("Возраст: 40", rendered)
+        self.assertIn('"skill_id": "sorting"', rendered)
+        with self.assertRaisesRegex(ValueError, "Unknown prompt placeholder"):
+            render_prompt_template("Unknown: {{child.unknown}}", {})
+        with self.assertRaisesRegex(ValueError, "Unknown prompt placeholder"):
+            validate_prompt_template("Unknown: {{child.unknown}}", "daily_plan_task1")
 
     def test_delivery_time_is_normalized_and_validated(self) -> None:
         self.assertEqual(parse_time(" 9:05 "), "09:05")
@@ -93,6 +114,56 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(self.database.get_prompt("diagnostics"), "A replacement prompt with sufficient content for validation.")
         self.assertEqual(self.database.prompt_history("diagnostics")[0]["version"], 1)
 
+    def test_ai_logs_are_encrypted_and_expired_rows_are_purged(self) -> None:
+        vault = SecretVault(Fernet.generate_key().decode("ascii"))
+        self.database.upsert_profile(79, 40, "Ж", "09:00", None)
+        request = json.dumps({"prompt": "private accessibility detail"})
+        response = json.dumps({"answer": "generated text"})
+        log_id = self.database.create_ai_request_log(
+            "diagnostics", 79, "gemini/gemini-2.5-pro", vault.encrypt(request)
+        )
+        self.database.finish_ai_request_log(log_id, "success", vault.encrypt(response))
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT request_encrypted, response_encrypted FROM ai_request_logs "
+                "WHERE id = ?",
+                (log_id,),
+            ).fetchone()
+            connection.execute(
+                "UPDATE ai_request_logs SET created_at = ? WHERE id = ?",
+                ((datetime.now(timezone.utc) - timedelta(days=31)).isoformat(), log_id),
+            )
+        self.assertNotIn("private accessibility detail", row["request_encrypted"])
+        self.assertEqual(vault.decrypt(row["request_encrypted"]), request)
+        self.assertEqual(vault.decrypt(row["response_encrypted"]), response)
+
+        variant_id = self.database.create_prompt_test_variant(
+            79,
+            "advice",
+            {"text": "Поддержите самостоятельный выбор ребёнка."},
+            None,
+        )
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE prompt_test_variants SET created_at = ? WHERE id = ?",
+                ((datetime.now(timezone.utc) - timedelta(days=31)).isoformat(), variant_id),
+            )
+        self.assertEqual(self.database.purge_ai_request_logs(), 1)
+        self.assertEqual(self.database.list_ai_request_logs(), [])
+        self.assertIsNone(self.database.prompt_test_variant(variant_id))
+
+    def test_legacy_daily_plan_prompt_is_migrated_without_losing_history(self) -> None:
+        self.database.update_prompt("daily_plan", LEGACY_DAILY_PLAN_PROMPT)
+        self.database.initialize()
+        self.assertEqual(
+            self.database.get_prompt("daily_plan"),
+            DEFAULT_PROMPTS["daily_plan"],
+        )
+        self.assertEqual(
+            self.database.prompt_history("daily_plan")[0]["prompt"],
+            LEGACY_DAILY_PLAN_PROMPT,
+        )
+
     def test_image_generation_reads_current_versioned_prompt(self) -> None:
         vault = SecretVault(Fernet.generate_key().decode("ascii"))
         ai = AIOrchestrator(
@@ -118,7 +189,11 @@ class PersistenceTests(unittest.TestCase):
             new_callable=AsyncMock,
             return_value=response,
         ) as generate_image:
-            asyncio.run(ai.generate_image("a red apple"))
+            asyncio.run(
+                ai.generate_image(
+                    "a red apple", image_cache_tag_hash="image-cache-key"
+                )
+            )
             self.database.update_prompt("image", replacement_prompt)
             asyncio.run(ai.generate_image("a blue cup"))
 
@@ -131,6 +206,10 @@ class PersistenceTests(unittest.TestCase):
             f"{replacement_prompt} a blue cup",
         )
         self.assertEqual(self.database.prompt_history("image")[0]["version"], 1)
+        logs = self.database.list_ai_request_logs(limit=2)
+        first_response = json.loads(vault.decrypt(logs[-1]["response_encrypted"]))
+        self.assertEqual(first_response["image_cache_tag_hash"], "image-cache-key")
+        self.assertEqual(first_response["image_bytes"], len(b"image-bytes"))
 
     def test_profile_uses_latest_skill_result_and_admin_key_stays_encrypted(self) -> None:
         vault = SecretVault(Fernet.generate_key().decode("ascii"))
@@ -295,6 +374,13 @@ class PersistenceTests(unittest.TestCase):
         self.database.cache_content(
             "activity", "3-4y", "shared-item", "shared-hash", {"title": "Общая игра"}
         )
+        self.database.cache_content(
+            "focus_task",
+            f"personal:{telegram_id}:plan:ru:40m",
+            "personal-item",
+            "personal-hash",
+            {"title": "Личный вариант"},
+        )
 
         self.assertTrue(self.database.delete_user(telegram_id))
         with self.database.connect() as connection:
@@ -315,7 +401,12 @@ class PersistenceTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM content_library WHERE content_hash = ?",
                 ("shared-hash",),
             ).fetchone()[0]
+            personal_content_count = connection.execute(
+                "SELECT COUNT(*) FROM content_library WHERE content_hash = ?",
+                ("personal-hash",),
+            ).fetchone()[0]
         self.assertEqual(shared_content_count, 1)
+        self.assertEqual(personal_content_count, 0)
         self.assertFalse(self.database.delete_user(telegram_id))
 
     def test_pending_plan_is_reused_and_due_users_are_timezone_clock_based(self) -> None:
@@ -396,16 +487,28 @@ class AssessmentOnboardingTests(unittest.TestCase):
 
 class ImageCacheTests(unittest.TestCase):
     class NoAI:
-        async def generate_image(self, _prompt: str) -> bytes:
-            del _prompt
+        async def generate_image(
+            self,
+            _prompt: str,
+            *,
+            telegram_id: int | None = None,
+            image_cache_tag_hash: str | None = None,
+        ) -> bytes:
+            del _prompt, telegram_id, image_cache_tag_hash
             raise AssertionError("Static stimulus generation must not call an AI model.")
 
     def test_images_are_reused_between_users_but_not_repeated_for_one_user(self) -> None:
         class FakeAI:
             calls = 0
 
-            async def generate_image(self, _prompt: str) -> bytes:
-                del _prompt
+            async def generate_image(
+                self,
+                _prompt: str,
+                *,
+                telegram_id: int | None = None,
+                image_cache_tag_hash: str | None = None,
+            ) -> bytes:
+                del _prompt, telegram_id, image_cache_tag_hash
                 self.calls += 1
                 if self.calls == 1:
                     return _picture_png(20, "red")
@@ -432,8 +535,14 @@ class ImageCacheTests(unittest.TestCase):
         class FakeAI:
             calls = 0
 
-            async def generate_image(self, prompt: str) -> bytes:
-                del prompt
+            async def generate_image(
+                self,
+                prompt: str,
+                *,
+                telegram_id: int | None = None,
+                image_cache_tag_hash: str | None = None,
+            ) -> bytes:
+                del prompt, telegram_id, image_cache_tag_hash
                 self.calls += 1
                 if self.calls == 1:
                     return _picture_png(24, "green", optimize=False)
@@ -465,6 +574,131 @@ class ImageCacheTests(unittest.TestCase):
             cache.remember_telegram_file(first[2], "file-1", 12)
             second = asyncio.run(cache.get_unique_stimulus(12, "shapes", "question-2"))
             self.assertNotEqual(first[0], second[0])
+
+
+class AIRequestLogTests(unittest.TestCase):
+    def test_component_generation_uses_its_prompt_and_logs_full_request_and_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "ai.sqlite3")
+            database.initialize()
+            database.upsert_profile(300, 40, "Ж", "09:00", None)
+            vault = SecretVault(Fernet.generate_key().decode("ascii"))
+            ai = AIOrchestrator(
+                database,
+                vault,
+                daily_budget_usd=1,
+                max_tokens=1000,
+            )
+            raw_response = '{"text":"Предложите ребёнку выбрать порядок игры."}'
+            response = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(message=SimpleNamespace(content=raw_response))
+                ],
+                usage=SimpleNamespace(prompt_tokens=21, completion_tokens=8),
+                _hidden_params={"response_cost": 0.002},
+                id="response-1",
+            )
+            with patch(
+                "app.ai.litellm.acompletion",
+                new_callable=AsyncMock,
+                return_value=response,
+            ) as completion:
+                result = asyncio.run(
+                    ai.generate_plan_component(
+                        "advice",
+                        {"age_months": 40, "language": "uk"},
+                        [],
+                        "normal",
+                        telegram_id=300,
+                    )
+                )
+
+            self.assertEqual(result.text, "Предложите ребёнку выбрать порядок игры.")
+            request = completion.await_args.kwargs
+            self.assertEqual(request["model"], "gemini/gemini-2.5-flash")
+            self.assertEqual(
+                request["messages"][2]["content"],
+                database.get_prompt("daily_plan_advice"),
+            )
+            self.assertIn("Ukrainian", request["messages"][3]["content"])
+            self.assertEqual(request["response_format"]["type"], "json_schema")
+            stored = database.list_ai_request_logs(telegram_id=300)
+            self.assertEqual(len(stored), 1)
+            self.assertEqual(stored[0]["task"], "daily_plan_advice")
+            logged_request = json.loads(
+                vault.decrypt(stored[0]["request_encrypted"])
+            )
+            logged_response = json.loads(
+                vault.decrypt(stored[0]["response_encrypted"])
+            )
+            self.assertEqual(logged_request["messages"], request["messages"])
+            self.assertEqual(logged_response["content"], raw_response)
+            self.assertEqual(logged_response["cost_usd"], 0.002)
+
+    def test_prompt_override_renders_child_context_without_replacing_active_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "prompt-override.sqlite3")
+            database.initialize()
+            vault = SecretVault(Fernet.generate_key().decode("ascii"))
+            ai = AIOrchestrator(
+                database,
+                vault,
+                daily_budget_usd=1,
+                max_tokens=1000,
+            )
+            response = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content='{"text":"Предложите игру по интересам ребёнка."}'
+                        )
+                    )
+                ],
+                usage=None,
+                _hidden_params={},
+                id="response-without-metrics",
+            )
+            traces: list[dict[str, object]] = []
+            with patch(
+                "app.ai.litellm.acompletion",
+                new_callable=AsyncMock,
+                return_value=response,
+            ) as completion:
+                asyncio.run(
+                    ai.generate_plan_component(
+                        "advice",
+                        {
+                            "age_months": 40,
+                            "gender": "Ж",
+                            "language": "ru",
+                            "interests": "конструкторы",
+                            "skills": [{"skill_id": "sorting", "result": "prompted"}],
+                        },
+                        [{"skill_id": "sorting", "result": "prompted"}],
+                        "hard",
+                        prompt_override=(
+                            "Учитывай возраст {{child.age_months}}, пол {{child.gender}}, "
+                            "интересы {{child.interests}} и навыки {{child.skills}}."
+                        ),
+                        request_traces=traces,
+                    )
+                )
+
+            active_prompt = database.get_prompt("daily_plan_advice")
+            messages = completion.await_args.kwargs["messages"]
+            self.assertIn("возраст 40", messages[2]["content"])
+            self.assertIn("пол Ж", messages[2]["content"])
+            self.assertIn("конструкторы", messages[2]["content"])
+            self.assertIn('"skill_id": "sorting"', messages[2]["content"])
+            self.assertEqual(database.get_prompt("daily_plan_advice"), active_prompt)
+            self.assertEqual(len(traces), 1)
+            stored = database.ai_request_logs_by_ids([int(traces[0]["id"])])[0]
+            logged_response = json.loads(
+                vault.decrypt(stored["response_encrypted"])
+            )
+            self.assertIsNone(logged_response["usage"]["prompt_tokens"])
+            self.assertIsNone(logged_response["cost_usd"])
+            self.assertIsInstance(logged_response["duration_ms"], int)
 
 
 class StructuredInputTests(unittest.TestCase):
@@ -542,6 +776,11 @@ class ContentLibraryTests(unittest.TestCase):
         def __init__(self) -> None:
             self.assessment_calls = 0
             self.plan_calls = 0
+            self.component_calls = {
+                "focus_task": 0,
+                "activity": 0,
+                "advice": 0,
+            }
 
         async def generate_assessment(
             self,
@@ -551,8 +790,10 @@ class ContentLibraryTests(unittest.TestCase):
             language: str = "ru",
             excluded_skill_ids: list[str] | None = None,
             excluded_questions: list[str] | None = None,
+            telegram_id: int | None = None,
+            child_context: dict[str, object] | None = None,
         ) -> AssessmentResponse:
-            del age_months, accessibility_notes, language, excluded_skill_ids, excluded_questions
+            del age_months, accessibility_notes, language, excluded_skill_ids, excluded_questions, telegram_id, child_context
             self.assessment_calls += 1
             scripts = (
                 (
@@ -584,16 +825,20 @@ class ContentLibraryTests(unittest.TestCase):
                 }
             )
 
-        async def generate_plan(
+        async def generate_plan_component(
             self,
+            component: str,
             profile: dict[str, object],
             gaps: list[dict[str, object]],
             feedback: str,
             *,
             avoid_recent: dict[str, list[str]] | None = None,
-        ) -> DailyPlan:
-            del profile, gaps, feedback, avoid_recent
-            self.plan_calls += 1
+            telegram_id: int | None = None,
+        ) -> FocusTask | Activity | ParentAdvice:
+            del profile, gaps, feedback, avoid_recent, telegram_id
+            self.component_calls[component] += 1
+            if component == "focus_task":
+                self.plan_calls += 1
             n = self.plan_calls
             variants = (
                 {
@@ -631,9 +876,9 @@ class ContentLibraryTests(unittest.TestCase):
                 },
             )
             variant = variants[(n - 1) % len(variants)]
-            return DailyPlan.model_validate(
-                {
-                    "focus_task": {
+            if component == "focus_task":
+                return FocusTask.model_validate(
+                    {
                         "title": variant["task"],
                         "worksheet": {
                             "title": variant["task"],
@@ -643,8 +888,12 @@ class ContentLibraryTests(unittest.TestCase):
                             "instructions": variant["instructions"],
                             "questions": [variant["question"]],
                         },
-                    },
-                    "activity": {
+                        "image_prompt": f"A simple worksheet illustration, variation {n}.",
+                    }
+                )
+            if component == "activity":
+                return Activity.model_validate(
+                    {
                         "title": variant["activity"],
                         "materials": variant["materials"],
                         "parent_script": variant["script"],
@@ -652,11 +901,10 @@ class ContentLibraryTests(unittest.TestCase):
                             f"Наблюдайте за изменениями во время занятия {n}.",
                             f"Сравните, что изменилось после игры {n}.",
                         ],
-                        "story_prompt": f"Уникальная картинка для игры {n}.",
-                    },
-                    "parent_advice": variant["advice"],
-                }
-            )
+                        "story_prompt": None,
+                    }
+                )
+            return ParentAdvice(text=variant["advice"])
 
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -711,6 +959,11 @@ class ContentLibraryTests(unittest.TestCase):
         first = asyncio.run(
             self.library.daily_plan(20, profile, "normal", "2026-11-14")
         )
+        self.assertEqual(self.ai.component_calls, {
+            "focus_task": 1,
+            "activity": 1,
+            "advice": 1,
+        })
         self.database.save_plan(20, "2026-11-14", first, status="pending")
         self.assertEqual(
             set(
@@ -727,6 +980,11 @@ class ContentLibraryTests(unittest.TestCase):
             self.library.daily_plan(20, profile, "normal", "2026-11-15")
         )
         self.assertEqual(self.ai.plan_calls, 2)
+        self.assertEqual(self.ai.component_calls, {
+            "focus_task": 2,
+            "activity": 2,
+            "advice": 2,
+        })
         self.assertEqual(first["focus_task"], other_user["focus_task"])
         self.assertNotEqual(first["focus_task"], second["focus_task"])
         self.assertNotEqual(first["parent_advice"], second["parent_advice"])
@@ -736,6 +994,35 @@ class ContentLibraryTests(unittest.TestCase):
             ),
             [],
         )
+
+    def test_accepted_personal_component_is_used_without_generating_it_again(self) -> None:
+        profile = self.database.profile(20)
+        focus_task = FocusTask.model_validate(
+            {
+                "title": "Личный вариант фокусного задания",
+                "worksheet": {
+                    "title": "Круги",
+                    "activity_type": "counting",
+                    "shape": "circle",
+                    "count": 3,
+                    "instructions": "Посчитайте круги на листе.",
+                    "questions": ["Сколько кругов?"],
+                },
+                "image_prompt": "Three circles on a white background.",
+            }
+        ).model_dump()
+        self.library.cache_personal_variant(
+            20, profile, "focus_task", focus_task
+        )
+
+        plan = asyncio.run(
+            self.library.daily_plan(20, profile, "normal", "2026-11-14")
+        )
+
+        self.assertEqual(plan["focus_task"], focus_task)
+        self.assertEqual(self.ai.component_calls["focus_task"], 0)
+        self.assertEqual(self.ai.component_calls["activity"], 1)
+        self.assertEqual(self.ai.component_calls["advice"], 1)
 
     def test_exhausted_question_pool_uses_cooldown_instead_of_repeated_ai_calls(self) -> None:
         class RepeatingAI:
@@ -749,8 +1036,10 @@ class ContentLibraryTests(unittest.TestCase):
                 language: str = "ru",
                 excluded_skill_ids: list[str] | None = None,
                 excluded_questions: list[str] | None = None,
+                telegram_id: int | None = None,
+                child_context: dict[str, object] | None = None,
             ) -> AssessmentResponse:
-                del age_months, accessibility_notes, language, excluded_skill_ids, excluded_questions
+                del age_months, accessibility_notes, language, excluded_skill_ids, excluded_questions, telegram_id, child_context
                 self.calls += 1
                 scripts = (
                     "Прыгните через верёвку и назовите птиц, которых знаете.",
@@ -1109,6 +1398,89 @@ class PlanDeliveryTests(unittest.TestCase):
                 "sent",
             )
 
+    def test_focus_image_is_sent_cached_and_reused_on_resend(self) -> None:
+        class FakeAI:
+            calls = 0
+
+            async def generate_image(
+                self,
+                prompt: str,
+                *,
+                telegram_id: int | None = None,
+                image_cache_tag_hash: str | None = None,
+            ) -> bytes:
+                del prompt, telegram_id, image_cache_tag_hash
+                self.calls += 1
+                return _picture_png(48, "red")
+
+        class FakeBot:
+            def __init__(self) -> None:
+                self.photos: list[object] = []
+
+            async def send_document(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+            async def send_photo(self, *_args: object, **_kwargs: object) -> object:
+                self.photos.append(_args[1])
+                return SimpleNamespace(photo=[SimpleNamespace(file_id="file-1")])
+
+            async def send_message(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Database(Path(temporary_directory) / "focus-image.sqlite3")
+            database.initialize()
+            database.upsert_profile(31, 36, "М", "09:00", None)
+            fake_ai = FakeAI()
+            cache = ImageCache(database, fake_ai)
+            bot = FakeBot()
+            prompt = "Three red circles on a clean white background."
+            plan = {
+                "focus_task": {
+                    "title": "Считаем круги",
+                    "image_prompt": prompt,
+                    "worksheet": {
+                        "title": "Круги",
+                        "activity_type": "counting",
+                        "shape": "circle",
+                        "count": 3,
+                        "instructions": "Посчитайте круги на листе.",
+                        "questions": ["Сколько кругов?"],
+                    },
+                },
+                "activity": {
+                    "title": "Лепим",
+                    "materials": ["пластилин"],
+                    "parent_script": "Скатайте шар и назовите его форму.",
+                    "age_facts": ["Факт первый.", "Факт второй."],
+                    "story_prompt": None,
+                },
+                "parent_advice": "Предложите ребёнку выбрать цвет пластилина.",
+            }
+            with patch("app.plans.make_worksheet", return_value=b"%PDF"):
+                asyncio.run(
+                    deliver_plan(bot, 31, plan, "2026-11-14", database, cache)
+                )
+                asyncio.run(
+                    deliver_plan(
+                        bot,
+                        31,
+                        plan,
+                        "2026-11-14",
+                        database,
+                        cache,
+                        force_resend=True,
+                    )
+                )
+
+            self.assertEqual(fake_ai.calls, 1)
+            self.assertEqual(len(bot.photos), 2)
+            self.assertEqual(bot.photos[1], "file-1")
+            self.assertIn(
+                "focus_image",
+                database.get_plan(31, "2026-11-14")["delivery_state"],
+            )
+
     def test_vector_stimulus_is_a_valid_png(self) -> None:
         image_bytes = make_stimulus("shapes")
         self.assertTrue(image_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
@@ -1270,6 +1642,271 @@ class AdminPlanResendTests(unittest.TestCase):
         self.assertEqual(validate_identity_name("  Мария Петрова "), "Мария Петрова")
         self.assertIsNone(validate_identity_name("  "))
         self.assertIsNone(validate_identity_name("A" * 121))
+
+
+class AdminPromptTestTests(unittest.TestCase):
+    def test_prompt_variant_can_be_previewed_saved_for_one_user_or_rejected(self) -> None:
+        class FakeAI:
+            def __init__(self) -> None:
+                self.last_prompt: str | None = None
+                self.last_context: dict[str, object] | None = None
+
+            async def generate_plan_component(
+                self,
+                component: str,
+                profile: dict[str, object],
+                gaps: list[dict[str, object]],
+                feedback: str,
+                *,
+                avoid_recent: dict[str, list[str]] | None = None,
+                telegram_id: int | None = None,
+                prompt_override: str | None = None,
+                request_traces: list[dict[str, object]] | None = None,
+            ) -> FocusTask | Activity | ParentAdvice:
+                del gaps, feedback, avoid_recent, telegram_id, request_traces
+                self.last_prompt = prompt_override
+                self.last_context = profile
+                if component == "focus_task":
+                    return FocusTask.model_validate(
+                        {
+                            "title": "Считаем круги",
+                            "worksheet": {
+                                "title": "Круги",
+                                "activity_type": "counting",
+                                "shape": "circle",
+                                "count": 3,
+                                "instructions": "Посчитайте круги на листе.",
+                                "questions": ["Сколько кругов?"],
+                            },
+                            "image_prompt": "A simple picture with three red circles.",
+                        }
+                    )
+                if component == "activity":
+                    return Activity(
+                        title="Лепим башню",
+                        materials=["пластилин"],
+                        parent_script="Скатайте три шарика и сравните их размер.",
+                        age_facts=["Факт первый.", "Факт второй."],
+                        story_prompt=None,
+                    )
+                return ParentAdvice(
+                    text="Предложите ребёнку выбрать порядок занятий."
+                )
+
+            async def generate_assessment(
+                self,
+                age_months: int,
+                accessibility_notes: str = "",
+                *,
+                language: str = "ru",
+                excluded_skill_ids: list[str] | None = None,
+                excluded_questions: list[str] | None = None,
+                telegram_id: int | None = None,
+                child_context: dict[str, object] | None = None,
+                prompt_override: str | None = None,
+                request_traces: list[dict[str, object]] | None = None,
+            ) -> AssessmentResponse:
+                del accessibility_notes, language, excluded_questions, telegram_id, request_traces
+                self.last_prompt = prompt_override
+                self.last_context = {"age_months": age_months, **(child_context or {})}
+                question = {
+                    "skill_id": "test_skill",
+                    "domains": ["motor", "language"],
+                    "parent_script": "Попросите ребёнка пройти и назвать предмет.",
+                    "stimulus_kind": None,
+                    "stimulus_prompt": None,
+                }
+                return AssessmentResponse.model_validate({"questions": [question] * 4})
+
+            async def generate_image(
+                self,
+                prompt: str,
+                *,
+                telegram_id: int | None = None,
+                image_cache_tag_hash: str | None = None,
+                request_traces: list[dict[str, object]] | None = None,
+            ) -> bytes:
+                del prompt, telegram_id, image_cache_tag_hash, request_traces
+                return _picture_png(48, "red")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            key = Fernet.generate_key().decode("ascii")
+            database = Database(Path(temporary_directory) / "admin-ai.sqlite3")
+            database.initialize()
+            database.upsert_profile(49, 40, "Ж", "09:00", None)
+            database.upsert_profile(50, 40, "М", "09:00", None)
+            database.record_skill(49, "sorting", "cognitive", "prompted")
+            settings = Settings(
+                telegram_token="test-token",
+                admin_token="admin-token",
+                data_encryption_key=key,
+                database_path=database.path,
+                default_delivery_time="09:00",
+                timezone="UTC",
+                daily_budget_usd=1,
+                max_tokens=1000,
+            )
+            from app.admin import create_app
+
+            fake_ai = FakeAI()
+            client = TestClient(
+                create_app(
+                    settings=settings,
+                    database=database,
+                    vault=SecretVault(key),
+                    ai=fake_ai,
+                )
+            )
+            headers = {"Authorization": "Bearer admin-token"}
+            preview = client.post(
+                "/admin/prompt-tests/focus_task",
+                headers=headers,
+                json={
+                    "telegram_id": 49,
+                    "prompt": "Draft task prompt with enough characters.",
+                },
+            )
+            self.assertEqual(preview.status_code, 200, preview.text)
+            self.assertEqual(fake_ai.last_prompt, "Draft task prompt with enough characters.")
+            self.assertEqual(database.get_prompt("daily_plan_task1"), DEFAULT_PROMPTS["daily_plan_task1"])
+            variant = preview.json()
+            image = client.get(variant["image_url"], headers=headers)
+            self.assertEqual(image.status_code, 200)
+            self.assertTrue(image.content.startswith(b"\x89PNG"))
+            accepted = client.post(
+                f"/admin/prompt-tests/variants/{variant['id']}/resolve",
+                headers=headers,
+                json={"status": "accepted"},
+            )
+            self.assertEqual(accepted.status_code, 200, accepted.text)
+            personal_cohort = "personal:49:plan:ru:40m"
+            self.assertEqual(
+                len(database.available_content(49, "focus_task", personal_cohort)),
+                1,
+            )
+            self.assertEqual(
+                database.available_content(
+                    50, "focus_task", "personal:50:plan:ru:40m"
+                ),
+                [],
+            )
+
+            rejected_preview = client.post(
+                "/admin/prompt-tests/activity",
+                headers=headers,
+                json={"telegram_id": 49},
+            )
+            self.assertEqual(rejected_preview.status_code, 200)
+            rejected_variant = rejected_preview.json()
+            rejected = client.post(
+                f"/admin/prompt-tests/variants/{rejected_variant['id']}/resolve",
+                headers=headers,
+                json={"status": "rejected"},
+            )
+            self.assertEqual(rejected.status_code, 200, rejected.text)
+            self.assertEqual(
+                database.available_content(49, "activity", personal_cohort),
+                [],
+            )
+
+            context_response = client.get(
+                "/admin/prompt-tests/context/49", headers=headers
+            )
+            self.assertEqual(context_response.status_code, 200)
+            context = context_response.json()
+            self.assertEqual(context["gender"], "Ж")
+            self.assertEqual(context["age_months"], 40)
+            self.assertEqual(context["diagnostic_results"][0]["skill_id"], "sorting")
+            self.assertNotIn("diagnosis_notes", context)
+
+            diagnostics = client.post(
+                "/admin/prompt-tests/diagnostics",
+                headers=headers,
+                json={
+                    "telegram_id": 49,
+                    "prompt": "Draft diagnostic prompt with enough characters.",
+                },
+            )
+            self.assertEqual(diagnostics.status_code, 200, diagnostics.text)
+            self.assertEqual(diagnostics.json()["status"], "preview")
+            self.assertEqual(fake_ai.last_context["gender"], "Ж")
+            self.assertEqual(fake_ai.last_context["skills"][0]["skill_id"], "sorting")
+            self.assertEqual(
+                database.get_prompt("diagnostics"), DEFAULT_PROMPTS["diagnostics"]
+            )
+
+            invalid_prompt = client.put(
+                "/admin/settings/prompts/daily_plan_task1",
+                headers=headers,
+                json={"prompt": "Prompt with {{child.unknown}} field."},
+            )
+            self.assertEqual(invalid_prompt.status_code, 422)
+            self.assertEqual(
+                database.get_prompt("daily_plan_task1"),
+                DEFAULT_PROMPTS["daily_plan_task1"],
+            )
+            replacement = (
+                "Создавай задание для ребёнка возраста {{child.age_months}} месяцев."
+            )
+            saved_prompt = client.put(
+                "/admin/settings/prompts/daily_plan_task1",
+                headers=headers,
+                json={"prompt": replacement},
+            )
+            self.assertEqual(saved_prompt.status_code, 200, saved_prompt.text)
+            self.assertEqual(saved_prompt.json()["version"], 2)
+            self.assertIn("child.age_months", saved_prompt.json()["placeholders"])
+            self.assertEqual(
+                database.get_prompt("daily_plan_task1"), replacement
+            )
+            self.assertEqual(database.prompt_history("daily_plan_task1")[0]["version"], 1)
+
+    def test_ai_log_endpoint_requires_admin_and_decrypts_full_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            key = Fernet.generate_key().decode("ascii")
+            vault = SecretVault(key)
+            database = Database(Path(temporary_directory) / "admin-logs.sqlite3")
+            database.initialize()
+            request = json.dumps(
+                {"messages": [{"role": "user", "content": "full prompt"}]}
+            )
+            response = json.dumps({"content": '{"result":"complete answer"}'})
+            log_id = database.create_ai_request_log(
+                "diagnostics", None, "gemini/gemini-2.5-pro", vault.encrypt(request)
+            )
+            database.finish_ai_request_log(
+                log_id, "success", vault.encrypt(response)
+            )
+            settings = Settings(
+                telegram_token="test-token",
+                admin_token="admin-token",
+                data_encryption_key=key,
+                database_path=database.path,
+                default_delivery_time="09:00",
+                timezone="UTC",
+                daily_budget_usd=1,
+                max_tokens=1000,
+            )
+            from app.admin import create_app
+
+            client = TestClient(
+                create_app(
+                    settings=settings,
+                    database=database,
+                    vault=vault,
+                    ai=object(),
+                )
+            )
+            self.assertEqual(client.get("/admin/ai-logs").status_code, 401)
+            result = client.get(
+                "/admin/ai-logs",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+            self.assertEqual(result.status_code, 200, result.text)
+            log = result.json()[0]
+            self.assertEqual(log["id"], log_id)
+            self.assertEqual(log["request"], json.loads(request))
+            self.assertEqual(log["response"], json.loads(response))
 
 
 class PrintableTests(unittest.TestCase):

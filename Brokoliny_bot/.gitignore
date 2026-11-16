@@ -3,3 +3,5 @@
 __pycache__/
 *.py[cod]
 data/*.sqlite3
+graphify-out/cache/
+node_modules/

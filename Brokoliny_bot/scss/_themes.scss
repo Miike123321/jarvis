@@ -1,0 +1,91 @@
+@use "variables" as v;
+
+:root[data-theme="kawaii"] {
+  color-scheme: light;
+  color: v.$color-pink-text;
+  background: v.$color-pink-background;
+  --cyan: #{v.$color-pink-accent};
+  --cyan-dim: #{v.$color-pink-accent-muted};
+  --amber: #{v.$color-pink-warning};
+  --muted: #{v.$color-pink-muted};
+  --panel: #{v.$color-pink-surface};
+  --line: #{v.$color-pink-border};
+}
+:root[data-theme="kawaii"] body {
+  background:
+    radial-gradient(ellipse at 10% 0%, v.$color-hex-ffdce9, transparent 34rem),
+    radial-gradient(ellipse at 92% 18%, v.$color-hex-ffe8d9, transparent 30rem);
+}
+:root[data-theme="kawaii"] body::before {
+  background-image: radial-gradient(v.$color-hex-f2c4d6 1.5px, transparent 1.5px);
+  background-size: 24px 24px;
+  opacity: .7;
+}
+:root[data-theme="kawaii"] h1,
+:root[data-theme="kawaii"] .prompt-card h3 { color: v.$color-hex-55283e; }
+:root[data-theme="kawaii"] p,
+:root[data-theme="kawaii"] label { color: v.$color-hex-694151; }
+:root[data-theme="kawaii"] .system-state { color: v.$color-hex-765343; }
+:root[data-theme="kawaii"] .system-state span::before {
+  background: v.$color-hex-45906b;
+  box-shadow: none;
+}
+:root[data-theme="kawaii"] .emblem {
+  border-color: v.$color-hex-e2a8c0;
+  background: v.$color-pink-surface;
+  box-shadow: 0 6px 20px v.$color-rgba-159-53-98-13;
+}
+:root[data-theme="kawaii"] .emblem::before {
+  inset: auto;
+  border: 0;
+  content: "🎀";
+  font: 28px/1 v.$font-sans;
+}
+:root[data-theme="kawaii"] .emblem::after { display: none; }
+:root[data-theme="kawaii"] section {
+  border-radius: 18px;
+  background: v.$color-rgba-255-252-253-95;
+  box-shadow: 0 10px 28px v.$color-rgba-143-57-91-09;
+}
+:root[data-theme="kawaii"] .auth-panel { border-color: v.$color-hex-e6a8be; }
+:root[data-theme="kawaii"] .prompt-card,
+:root[data-theme="kawaii"] #users .row {
+  border-color: var(--line);
+  border-radius: 12px;
+  background: v.$color-hex-fff5f9;
+}
+:root[data-theme="kawaii"] input,
+:root[data-theme="kawaii"] textarea,
+:root[data-theme="kawaii"] select {
+  border-color: v.$color-hex-d7a1b8;
+  border-radius: 8px;
+  background: v.$color-hex-fff;
+  color: v.$color-pink-text;
+}
+:root[data-theme="kawaii"] input::placeholder { color: v.$color-hex-80616e; }
+:root[data-theme="kawaii"] button {
+  border-color: v.$color-hex-dca2ba;
+  border-radius: 10px;
+  background: v.$color-hex-ffe5ef;
+  color: v.$color-hex-84204c;
+}
+:root[data-theme="kawaii"] button:hover {
+  border-color: v.$color-hex-bd4d7b;
+  background: v.$color-hex-ffd3e4;
+  box-shadow: 0 4px 12px v.$color-rgba-164-47-94-12;
+}
+:root[data-theme="kawaii"] button.danger { color: v.$color-hex-9c1d31; background: v.$color-hex-ffe4e5; }
+:root[data-theme="kawaii"] button.danger:hover { background: v.$color-hex-ffd0d3; }
+:root[data-theme="kawaii"] pre,
+:root[data-theme="kawaii"] .trace-panel {
+  border-color: v.$color-hex-eac2d2;
+  background: v.$color-hex-fff7fa;
+  color: v.$color-pink-text;
+}
+:root[data-theme="kawaii"] .trace-drawer {
+  background: v.$color-pink-surface;
+  box-shadow: -16px 0 48px v.$color-rgba-143-57-91-14;
+}
+:root[data-theme="kawaii"] th,
+:root[data-theme="kawaii"] td { border-color: v.$color-hex-eac2d2; }
+:root[data-theme="kawaii"] summary { color: v.$color-hex-84204c; }

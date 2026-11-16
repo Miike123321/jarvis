@@ -23,6 +23,10 @@ class ImageCache:
         return hashlib.sha256(tag.encode("utf-8")).hexdigest()
 
     @staticmethod
+    def task_image_tag(prompt: str) -> str:
+        return f"plan-task1:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}"
+
+    @staticmethod
     def _image_hashes(image_bytes: bytes) -> tuple[str, str]:
         image_key = hashlib.sha256(image_bytes).hexdigest()
         with Image.open(io.BytesIO(image_bytes)) as image:
@@ -74,7 +78,12 @@ class ImageCache:
         raise RuntimeError("No unseen stimulus image could be created.")
 
     async def get_or_generate(
-        self, tag: str, prompt: str, telegram_id: int | None = None
+        self,
+        tag: str,
+        prompt: str,
+        telegram_id: int | None = None,
+        *,
+        request_traces: list[dict[str, object]] | None = None,
     ) -> tuple[bytes, str | None, str]:
         for variant in range(MAX_IMAGE_VARIANTS):
             variant_tag = tag if variant == 0 else f"{tag}::variant:{variant}"
@@ -90,7 +99,19 @@ class ImageCache:
                     else f" Create a distinct composition variation number {variant}: "
                     "change object placement, viewing angle, and background spacing."
                 )
-                image_bytes = await self.ai.generate_image(prompt + variation)
+                if request_traces is None:
+                    image_bytes = await self.ai.generate_image(
+                        prompt + variation,
+                        telegram_id=telegram_id,
+                        image_cache_tag_hash=tag_hash,
+                    )
+                else:
+                    image_bytes = await self.ai.generate_image(
+                        prompt + variation,
+                        telegram_id=telegram_id,
+                        image_cache_tag_hash=tag_hash,
+                        request_traces=request_traces,
+                    )
                 self.database.save_image(tag_hash, variant_tag, image_bytes)
                 file_id = None
             if telegram_id is None or not self._image_seen(telegram_id, image_bytes):

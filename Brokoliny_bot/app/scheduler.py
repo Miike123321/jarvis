@@ -116,5 +116,13 @@ def start_scheduler(
         max_instances=1,
         coalesce=True,
     )
+    scheduler.add_job(
+        database.purge_ai_request_logs,
+        "interval",
+        minutes=1,
+        id="purge-ai-request-logs",
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
     return scheduler

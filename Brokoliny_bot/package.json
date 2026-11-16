@@ -1,0 +1,12 @@
+{
+  "name": "brokoliny-admin-styles",
+  "private": true,
+  "scripts": {
+    "build:css": "sass --no-source-map scss/admin.scss app/static/admin.css",
+    "watch:css": "sass --no-source-map --watch --poll scss/admin.scss:app/static/admin.css",
+    "test:ui": "node --test tests/admin-ui.test.js"
+  },
+  "devDependencies": {
+    "sass": "1.83.4"
+  }
+}

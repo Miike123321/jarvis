@@ -1,0 +1,73 @@
+@use "variables" as v;
+
+.skip-link {
+  position: absolute;
+  z-index: 30;
+  top: 8px;
+  left: 8px;
+  padding: 10px 14px;
+  transform: translateY(-150%);
+  border: 2px solid var(--cyan);
+  background: v.$color-dark-background;
+  color: v.$color-dark-text;
+}
+.skip-link:focus { transform: none; }
+:root[data-theme="kawaii"] .skip-link { background: v.$color-pink-surface; color: v.$color-pink-text; }
+.section-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 20px 0;
+}
+.section-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid v.$color-hex-6b9aa3;
+  border-radius: 4px;
+  background: v.$color-hex-0a1920;
+  text-decoration: none;
+}
+.section-nav a:hover { text-decoration: underline; }
+:root[data-theme="kawaii"] .section-nav a {
+  border-color: v.$color-hex-a65376;
+  border-radius: 10px;
+  background: v.$color-hex-fff5f9;
+}
+main, .grid, .prompt-layout, .row > * { min-width: 0; }
+main h2 { scroll-margin-top: 16px; }
+button, summary { min-height: 44px; }
+summary { padding: 10px 0; }
+input, textarea, select, button { border-color: v.$color-hex-6b9aa3; }
+:root[data-theme="kawaii"] input,
+:root[data-theme="kawaii"] textarea,
+:root[data-theme="kawaii"] select,
+:root[data-theme="kawaii"] button { border-color: v.$color-hex-a65376; }
+button:disabled, input:disabled, select:disabled, textarea:disabled {
+  cursor: not-allowed;
+  opacity: .7;
+}
+.row, summary, td, th, .prompt-card { overflow-wrap: anywhere; }
+table { display: block; max-width: 100%; overflow-x: auto; }
+@media (max-width: v.$breakpoint-mobile) {
+  body { padding-top: 18px; }
+  .masthead { align-items: flex-start; flex-wrap: wrap; gap: 12px; }
+  .mast-actions { width: 100%; justify-content: space-between; }
+  .emblem { flex-basis: 44px; width: 44px; height: 44px; }
+  .system-state { min-width: 0; padding: 6px 0 6px 10px; font-size: 8px; }
+  .system-state small { display: none; }
+  section { padding: 16px; }
+  #users .row { align-items: stretch; }
+}
+@media (max-width: v.$breakpoint-drawer) {
+  .trace-drawer { width: 100vw; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

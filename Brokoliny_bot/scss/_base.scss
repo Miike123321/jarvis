@@ -1,0 +1,42 @@
+@use "variables" as v;
+
+* { box-sizing: border-box; }
+body {
+  position: relative;
+  isolation: isolate;
+  max-width: 1320px;
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 30px clamp(16px, 3vw, 42px) 64px;
+  background:
+    radial-gradient(ellipse at 12% 0%, v.$color-rgba-20-119-137-18, transparent 34rem),
+    radial-gradient(ellipse at 92% 18%, v.$color-rgba-174-101-34-1, transparent 30rem);
+}
+body::before {
+  position: fixed;
+  z-index: -1;
+  inset: 0;
+  background-image:
+    linear-gradient(v.$color-rgba-102-234-255-035 1px, transparent 1px),
+    linear-gradient(90deg, v.$color-rgba-102-234-255-035 1px, transparent 1px);
+  background-size: 34px 34px;
+  content: "";
+  pointer-events: none;
+  mask-image: linear-gradient(to bottom, black, transparent 90%);
+}
+h1, h2, p { margin-top: 0; }
+h1 {
+  margin-bottom: 4px;
+  color: v.$color-hex-f0fbfc;
+  font: 600 clamp(24px, 4vw, 36px)/1.15 v.$font-sans;
+  letter-spacing: .04em;
+}
+h1 span { color: var(--cyan); }
+h2 {
+  margin-bottom: 14px;
+  color: var(--cyan);
+  font: 600 14px/1.4 v.$font-sans;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+p { color: v.$color-hex-a9bdc1; }

@@ -87,6 +87,34 @@ async def deliver_plan(
         if not force_resend:
             database.mark_plan_part_sent(telegram_id, plan_date, "worksheet")
 
+    image_prompt = plan["focus_task"].get("image_prompt")
+    if image_prompt and (
+        force_resend or "focus_image" not in delivery_state
+    ):
+        image_tag = ImageCache.task_image_tag(image_prompt)
+        cached_image = (
+            image_cache.get_cached_image(image_tag)
+            if force_resend
+            else await image_cache.get_or_generate(
+                image_tag, image_prompt, telegram_id
+            )
+        )
+        if cached_image is not None:
+            image_bytes, telegram_file_id, tag_hash = cached_image
+            if telegram_file_id:
+                await bot.send_photo(telegram_id, telegram_file_id)
+            else:
+                sent = await bot.send_photo(
+                    telegram_id,
+                    BufferedInputFile(image_bytes, filename="focus-task.png"),
+                )
+                if not sent.photo:
+                    raise RuntimeError("Telegram did not return the sent image metadata.")
+                telegram_file_id = sent.photo[-1].file_id
+            image_cache.remember_telegram_file(tag_hash, telegram_file_id, telegram_id)
+            if not force_resend:
+                database.mark_plan_part_sent(telegram_id, plan_date, "focus_image")
+
     story_prompt = plan["activity"]["story_prompt"]
     if story_prompt and (
         force_resend or "story_image" not in delivery_state

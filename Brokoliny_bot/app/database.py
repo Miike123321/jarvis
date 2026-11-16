@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Generator
 
@@ -35,13 +35,27 @@ DEFAULT_PROMPTS = {
         "scorable as independent, prompted, or not yet. Avoid medical conclusions."
     ),
     "daily_plan": (
-        "Create exactly three age-appropriate blocks: a printable cognitive task, a "
-        "sensory/motor activity with useful parent language and accurate, concrete "
-        "age-appropriate facts, and a concise parent tip. Keep tasks safe, accessible, "
-        "playful, and doable with ordinary household items. The printable may be "
-        "counting, geometry, pattern completion, or a deterministic find-the-difference "
-        "worksheet. Use the child's observed "
-        "learning needs and recent difficulty feedback. Never present advice as treatment."
+        "Create one safe, inclusive, age-appropriate component for a home-learning "
+        "plan. Use the child's observed learning opportunities and recent difficulty "
+        "feedback. Keep activities optional, accessible, and doable with ordinary "
+        "household items. Never diagnose or present advice as treatment."
+    ),
+    "daily_plan_task1": (
+        "Create one concrete cognitive worksheet task using the required FocusTask "
+        "schema. Make the worksheet solvable and internally consistent with its count, "
+        "shape, instructions, and questions. Include a concise image_prompt for a "
+        "supporting illustration; request a simple white-background image with no text."
+    ),
+    "daily_plan_task2": (
+        "Create one practical sensory or motor activity using the required Activity "
+        "schema. Give the caregiver exact words to model, useful language or movement "
+        "vocabulary, ordinary materials, and two to five accurate concrete age-appropriate "
+        "facts. Set story_prompt to null; the illustration belongs to task 1."
+    ),
+    "daily_plan_advice": (
+        "Create one concise, specific parent suggestion for today. Base it on the "
+        "selected child's observed learning opportunities and make it practical, "
+        "respectful, and non-clinical. Never diagnose or present advice as treatment."
     ),
     "image": (
         "Clean Montessori-inspired vector illustration for a children's learning activity, "
@@ -49,6 +63,16 @@ DEFAULT_PROMPTS = {
         "no decorative clutter."
     ),
 }
+
+LEGACY_DAILY_PLAN_PROMPT = (
+    "Create exactly three age-appropriate blocks: a printable cognitive task, a "
+    "sensory/motor activity with useful parent language and accurate, concrete "
+    "age-appropriate facts, and a concise parent tip. Keep tasks safe, accessible, "
+    "playful, and doable with ordinary household items. The printable may be "
+    "counting, geometry, pattern completion, or a deterministic find-the-difference "
+    "worksheet. Use the child's observed learning needs and recent difficulty "
+    "feedback. Never present advice as treatment."
+)
 
 
 class Database:
@@ -174,6 +198,30 @@ class Database:
             cost_usd REAL NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS ai_request_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task TEXT NOT NULL,
+            telegram_id INTEGER REFERENCES users(telegram_id) ON DELETE CASCADE,
+            model TEXT NOT NULL,
+            status TEXT NOT NULL,
+            request_encrypted TEXT NOT NULL,
+            response_encrypted TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_request_logs_created
+            ON ai_request_logs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_ai_request_logs_user
+            ON ai_request_logs(telegram_id, created_at);
+        CREATE TABLE IF NOT EXISTS prompt_test_variants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+            component TEXT NOT NULL CHECK(component IN ('focus_task', 'activity', 'advice')),
+            content_json TEXT NOT NULL,
+            image_tag_hash TEXT,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'accepted', 'rejected')),
+            created_at TEXT NOT NULL
+        );
         """
         with self.connect() as connection:
             connection.executescript(schema)
@@ -230,6 +278,9 @@ class Database:
                     "VALUES (?, ?, 1, ?)",
                     (name, prompt, datetime.now().astimezone().isoformat()),
                 )
+        if self.get_prompt("daily_plan") == LEGACY_DAILY_PLAN_PROMPT:
+            self.update_prompt("daily_plan", DEFAULT_PROMPTS["daily_plan"])
+        self.purge_ai_request_logs()
 
     def get_setting(self, key: str, default: Any = None) -> Any:
         with self.connect() as connection:
@@ -297,6 +348,133 @@ class Database:
                 (name,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def create_ai_request_log(
+        self,
+        task: str,
+        telegram_id: int | None,
+        model: str,
+        request_encrypted: str,
+    ) -> int:
+        self.purge_ai_request_logs()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO ai_request_logs"
+                "(task, telegram_id, model, status, request_encrypted, created_at) "
+                "VALUES (?, ?, ?, 'pending', ?, ?)",
+                (
+                    task,
+                    telegram_id,
+                    model,
+                    request_encrypted,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def finish_ai_request_log(
+        self, log_id: int, status: str, response_encrypted: str
+    ) -> None:
+        if status not in {"success", "error", "invalid"}:
+            raise ValueError(f"Unsupported AI request log status: {status}")
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE ai_request_logs SET status = ?, response_encrypted = ? WHERE id = ?",
+                (status, response_encrypted, log_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"AI request log {log_id} does not exist.")
+
+    def list_ai_request_logs(
+        self, *, limit: int = 100, telegram_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        self.purge_ai_request_logs()
+        with self.connect() as connection:
+            if telegram_id is None:
+                rows = connection.execute(
+                    "SELECT id, task, telegram_id, model, status, request_encrypted, "
+                    "response_encrypted, created_at FROM ai_request_logs "
+                    "ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT id, task, telegram_id, model, status, request_encrypted, "
+                    "response_encrypted, created_at FROM ai_request_logs "
+                    "WHERE telegram_id = ? ORDER BY id DESC LIMIT ?",
+                    (telegram_id, limit),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ai_request_logs_by_ids(self, log_ids: list[int]) -> list[dict[str, Any]]:
+        if not log_ids:
+            return []
+        placeholders = ",".join("?" for _ in log_ids)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT id, task, telegram_id, model, status, request_encrypted, "
+                "response_encrypted, created_at FROM ai_request_logs "
+                f"WHERE id IN ({placeholders}) ORDER BY id",
+                log_ids,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def purge_ai_request_logs(self) -> int:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        with self.connect() as connection:
+            logs = connection.execute(
+                "DELETE FROM ai_request_logs WHERE created_at < ?", (cutoff,)
+            )
+            connection.execute(
+                "DELETE FROM prompt_test_variants WHERE created_at < ?", (cutoff,)
+            )
+        return int(logs.rowcount)
+
+    def create_prompt_test_variant(
+        self,
+        telegram_id: int,
+        component: str,
+        content: dict[str, Any],
+        image_tag_hash: str | None,
+    ) -> int:
+        if component not in {"focus_task", "activity", "advice"}:
+            raise ValueError(f"Unsupported prompt test component: {component}")
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO prompt_test_variants"
+                "(telegram_id, component, content_json, image_tag_hash, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    telegram_id,
+                    component,
+                    json.dumps(content, ensure_ascii=False),
+                    image_tag_hash,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def prompt_test_variant(self, variant_id: int) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM prompt_test_variants WHERE id = ?", (variant_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["content"] = json.loads(result.pop("content_json"))
+        return result
+
+    def resolve_prompt_test_variant(self, variant_id: int, status: str) -> bool:
+        if status not in {"accepted", "rejected"}:
+            raise ValueError(f"Unsupported prompt test variant status: {status}")
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE prompt_test_variants SET status = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (status, variant_id),
+            )
+        return cursor.rowcount == 1
 
     def store_secret(self, provider: str, encrypted_key: str) -> None:
         self.set_setting(f"secret:{provider}", encrypted_key)
@@ -514,6 +692,10 @@ class Database:
 
     def delete_user(self, telegram_id: int) -> bool:
         with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM content_library WHERE cohort LIKE ?",
+                (f"personal:{telegram_id}:%",),
+            )
             cursor = connection.execute(
                 "DELETE FROM users WHERE telegram_id = ?", (telegram_id,)
             )

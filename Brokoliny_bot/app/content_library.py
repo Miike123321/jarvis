@@ -12,7 +12,7 @@ from app.database import Database
 
 logger = logging.getLogger(__name__)
 MAX_GENERATION_ATTEMPTS = 5
-MAX_GENERATIONS_PER_REQUEST = 2
+MAX_GENERATIONS_PER_REQUEST = 3
 GENERATION_COOLDOWN_SECONDS = 3600
 
 
@@ -151,16 +151,8 @@ class ContentLibrary:
                     "Вопросы для вас недавно уже запрашивались, но новых пока нет. "
                     "Попробуйте позже — старые вопросы повторно не отправляются."
                 )
-            used = self.database.used_content(telegram_id, "assessment_question")
-            excluded = [
-                row["dedupe_key"].removeprefix("skill:")
-                for row in used
-                if row["dedupe_key"].startswith("skill:")
-            ]
-            excluded_questions = [
-                _descriptor("assessment_question", row["content"])[:180]
-                for row in used[-20:]
-            ]
+            excluded, excluded_questions = self.assessment_exclusions(telegram_id)
+            child_profile = self.database.profile(telegram_id) or {}
             try:
                 generated = await self.ai.generate_assessment(
                     age_months,
@@ -168,6 +160,18 @@ class ContentLibrary:
                     language=language,
                     excluded_skill_ids=excluded,
                     excluded_questions=excluded_questions,
+                    telegram_id=telegram_id,
+                    child_context={
+                        "gender": child_profile.get("gender"),
+                        "interests": child_profile.get("interests"),
+                        "skills": child_profile.get("skills", []),
+                        "skill_gaps": [
+                            skill
+                            for skill in child_profile.get("skills", [])
+                            if skill["result"] != "independent"
+                        ],
+                        "diagnostic_results": child_profile.get("skills", []),
+                    },
                 )
             except Exception:
                 self.database.set_generation_cooldown(
@@ -195,6 +199,21 @@ class ContentLibrary:
             "Не удалось подготовить достаточно новых вопросов без повторов. "
             "Попробуйте позже или обратитесь к администратору."
         )
+
+    def assessment_exclusions(
+        self, telegram_id: int, *, limit: int = 20
+    ) -> tuple[list[str], list[str]]:
+        used = self.database.used_content(telegram_id, "assessment_question")
+        excluded_skills = [
+            row["dedupe_key"].removeprefix("skill:")
+            for row in used
+            if row["dedupe_key"].startswith("skill:")
+        ]
+        excluded_questions = [
+            _descriptor("assessment_question", row["content"])[:180]
+            for row in used[-limit:]
+        ]
+        return excluded_skills, excluded_questions
 
     @staticmethod
     def plan_cohort(profile: dict[str, Any], feedback: str) -> str:
@@ -228,45 +247,52 @@ class ContentLibrary:
                 category: self._fresh_available(telegram_id, category, cohort)
                 for category in categories
             }
-            if any(not items for items in available.values()):
-                if generated_count >= MAX_GENERATIONS_PER_REQUEST:
-                    self.database.set_generation_cooldown(
-                        telegram_id, cohort, seconds=GENERATION_COOLDOWN_SECONDS
-                    )
-                    raise ContentExhausted(
-                        "Пул новых заданий пока исчерпан. Старые задания и советы "
-                        "повторно не отправляются; попробуйте позже."
-                    )
-                if self.database.generation_cooling_down(telegram_id, cohort):
-                    raise ContentExhausted(
-                        "Для вас недавно уже создавали новые задания. "
-                        "Попробуйте позже — прежний контент не повторится."
-                    )
-                history = {
-                    category: [
-                        _descriptor(category, row["content"])[:180]
-                        for row in self.database.used_content(telegram_id, category)[-12:]
-                    ]
-                    for category in categories
-                }
-                try:
-                    generated = await self.ai.generate_plan(
-                        profile,
-                        [
-                            skill
-                            for skill in profile.get("skills", [])
-                            if skill["result"] != "independent"
-                        ],
-                        feedback,
-                        avoid_recent=history,
-                    )
-                except Exception:
-                    self.database.set_generation_cooldown(
-                        telegram_id, cohort, seconds=GENERATION_COOLDOWN_SECONDS
-                    )
-                    raise
-                generated_count += 1
-                self._cache_daily_plan(cohort, generated.model_dump())
+            missing = [category for category in categories if not available[category]]
+            if missing:
+                for category in missing:
+                    if generated_count >= MAX_GENERATIONS_PER_REQUEST:
+                        self.database.set_generation_cooldown(
+                            telegram_id, cohort, seconds=GENERATION_COOLDOWN_SECONDS
+                        )
+                        raise ContentExhausted(
+                            "Пул новых заданий пока исчерпан. Старые задания и советы "
+                            "повторно не отправляются; попробуйте позже."
+                        )
+                    if self.database.generation_cooling_down(telegram_id, cohort):
+                        raise ContentExhausted(
+                            "Для вас недавно уже создавали новые задания. "
+                            "Попробуйте позже — прежний контент не повторится."
+                        )
+                    history = {
+                        component: [
+                            _descriptor(component, row["content"])[:180]
+                            for row in self.database.used_content(
+                                telegram_id, component
+                            )[-12:]
+                        ]
+                        for component in categories
+                    }
+                    try:
+                        generated_component = await self.ai.generate_plan_component(
+                            category,
+                            profile,
+                            [
+                                skill
+                                for skill in profile.get("skills", [])
+                                if skill["result"] != "independent"
+                            ],
+                            feedback,
+                            avoid_recent=history,
+                            telegram_id=telegram_id,
+                        )
+                    except Exception:
+                        self.database.set_generation_cooldown(
+                            telegram_id, cohort, seconds=GENERATION_COOLDOWN_SECONDS
+                        )
+                        raise
+                    generated_count += 1
+                    content = generated_component.model_dump()
+                    self._cache_component(category, cohort, content)
                 continue
 
             selected_items: dict[str, dict[str, Any]] = {}
@@ -302,15 +328,51 @@ class ContentLibrary:
     def _fresh_available(
         self, telegram_id: int, category: str, cohort: str
     ) -> list[dict[str, Any]]:
-        available = self.database.available_content(
-            telegram_id, category, cohort, limit=10000
-        )
+        personal_cohort = f"personal:{telegram_id}:"
+        if cohort.startswith("plan:"):
+            language, age_cohort = cohort.split(":")[1:3]
+            personal_cohort += f"plan:{language}:{age_cohort}"
+            available = self.database.available_content(
+                telegram_id, category, personal_cohort, limit=10000
+            )
+            available += self.database.available_content(
+                telegram_id, category, cohort, limit=10000
+            )
+        else:
+            available = self.database.available_content(
+                telegram_id, category, cohort, limit=10000
+            )
         history = self.database.used_content(telegram_id, category)
         return [
             item
             for item in available
             if not _similar_to_history(category, item["content"], history)
         ]
+
+    def cache_personal_variant(
+        self, telegram_id: int, profile: dict[str, Any], category: str, content: Any
+    ) -> None:
+        if category not in {"focus_task", "activity", "advice"}:
+            raise ValueError(f"Unsupported daily plan component: {category}")
+        history = self.database.used_content(telegram_id, category)
+        if _similar_to_history(category, content, history):
+            raise ValueError("This component is too similar to content already used.")
+        cohort = (
+            f"personal:{telegram_id}:plan:{profile.get('language', 'ru')}:"
+            f"{_age_cohort(int(profile['age_months']))}"
+        )
+        self._cache_component(category, cohort, content)
+
+    def recent_component_descriptions(
+        self, telegram_id: int, *, limit: int = 12
+    ) -> dict[str, list[str]]:
+        return {
+            category: [
+                _descriptor(category, row["content"])[:180]
+                for row in self.database.used_content(telegram_id, category)[-limit:]
+            ]
+            for category in ("focus_task", "activity", "advice")
+        }
 
     def repeated_plan_components(
         self,
